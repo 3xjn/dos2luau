@@ -54,6 +54,7 @@ async function stage(directory: string) {
 
 await stage("runtime");
 await stage("tests");
+await stage("spec");
 const testScript = process.argv[2] ?? "tests/runtime.luau";
 const result = spawnSync(
   "lune",

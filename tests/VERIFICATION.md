@@ -8,6 +8,7 @@ Verified on Windows with Bun 1.3.4, Lune 0.10.4, and official Luau CLI 0.744.
 | `bun run test:runtime` | 34 checks, zero failures |
 | `bun run test:performance` | 5 REP parity and safety groups pass |
 | `bun run test:video` | 9 raster, display-setting and text-region checks pass |
+| `bun run test:text-regions` | Wrapped text/graphics choice bounds, hover/click, and continuation boundaries pass |
 | `bun run test:input` | 18 routing, focus, assist and device checks pass |
 | `bun run test:settings-runtime` | 4 speed, gain, initialization and legacy keyboard checks pass |
 | `bun run test:settings` | Setting dispatch, shortcuts and touch override checks pass |
@@ -81,6 +82,12 @@ advancing from the main menu to professions. Native mouse-movement events
 showed the hover outline and cleared it on exit. Simulated stick tests cover
 neutral hysteresis, direction changes and raw directional fallback outside
 menus; a physical thumbstick was not tested.
+Wrapped option 4 merges both lines in synthetic text and graphics menus, with
+the continuation separately exercised through hover and digit+Enter injection.
+The captured Oregon profession frame also yields one option-4 rectangle covering
+the real BGI continuation line. Blank rows, outdents and prompts stop merging.
+In the live Studio client, hovering the second line outlined both lines, and
+clicking it opened Oregon's profession-differences screen (option 4).
 The final production LocalScript boots without privileged diagnostic helpers.
 Its camera remains Scriptable after a competing type change, the emote wheel
 stays disabled after the Period shortcut, local character Sound volumes are
