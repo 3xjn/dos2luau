@@ -1,0 +1,14 @@
+{
+  "name": "dos2luau",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "DOS2Luau": { "$path": "runtime" }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "DOSDemo": { "$path": "examples/Demo.client.luau" }
+      }
+    }
+  }
+}

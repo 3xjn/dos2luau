@@ -1,0 +1,11 @@
+node_modules/
+.test-runtime/
+.tools/
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+coverage/
+.local-games/
+runtime/OutOregon/
+dist/

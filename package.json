@@ -1,0 +1,15 @@
+{
+  "name": "dos2luau",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test compiler && bun run test:runtime",
+    "test:runtime": "bun scripts/test-runtime.ts",
+    "demo": "bun scripts/build-demo.ts",
+    "compile": "bun compiler/src/cli.ts",
+    "build:studio": "bun scripts/build-studio.ts",
+    "test:oregon": "bun scripts/test-runtime.ts tests/oregon.luau",
+    "check:luau": "bun scripts/check-luau.ts"
+  }
+}
