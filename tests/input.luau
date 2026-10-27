@@ -117,8 +117,10 @@ check("pointer updates clamped coordinates and releases touch button", function(
 end)
 check("gamepad shoulders wrap and buttons emit mapped keys", function()
 	local r, _, b, _, ctx = fixture()
+	r.machine.cpu.waitingForKey = true
 	ctx.menu = true
 	ctx.choices = { 2, 4 }
+	ctx.regions = { { digit = 2 }, { digit = 4 } }
 	r:update(0)
 	r:gamepadButton("ButtonL1", true)
 	r:gamepadButton("ButtonR1", true)
@@ -134,6 +136,7 @@ check("gamepad shoulders wrap and buttons emit mapped keys", function()
 			and pop(b) == 0x1c0d
 			and pop(b) == 0x1c0d
 	)
+	r.machine.cpu.waitingForKey = false
 	r:gamepadAxis("Thumbstick1", 0.5, 0.5)
 	assert(r.held.Right == 1 and r.held.Up == 1)
 	r:releaseAll()
@@ -198,11 +201,13 @@ check("context recognition only on demand and refreshed after screen changes", f
 	assert(pop(b) == 0x3920)
 	ctx.menu = true
 	ctx.choices = { 4 }
+	ctx.regions = { { digit = 4 } }
+	r.machine.cpu.waitingForKey = true
 	r:gamepadButton("ButtonR1", true)
 	assert(reads == 4)
 	flush(r)
 	assert(pop(b) == 0x0534 and pop(b) == 0x1c0d)
-	assert(r:getContext() == ctx and reads == 5)
+	assert(r:getContext() == ctx and reads == 6)
 end)
 check("screen pointer coordinates account for GUI inset", function()
 	local r, _, b, _, ctx = fixture()
@@ -342,6 +347,7 @@ check("real video defaults are passthrough and avoid OCR", function()
 	real:gamepadButton("DPadDown", false)
 	real.queue = {}
 	real:setMenuAssist(true)
+	real.machine.cpu.waitingForKey = true
 	real:setInputType("Gamepad1")
 	local shown: any = nil
 	real.hud = {
@@ -405,5 +411,132 @@ check("force off suppresses touch thumbstick while preserving mouse", function()
 	assert(s.held.Right)
 	r:pointerUp("other", 0.45, 0.2)
 	assert(not s.held.Right)
+end)
+local function menuFixture(): (any, any, any, any, any)
+	local r, s, b, _, ctx = fixture()
+	r.machine.cpu.waitingForKey = true
+	ctx.menu = true
+	ctx.kind = "prompt"
+	ctx.choices = { 1, 3, 5, 7 }
+	ctx.regions = {
+		{ digit = 1, x = 0.2, y = 0.2, width = 0.5, height = 0.08 },
+		{ digit = 3, x = 0.2, y = 0.3, width = 0.5, height = 0.08 },
+		{ digit = 7, x = 0.2, y = 0.4, width = 0.5, height = 0.08 },
+	}
+	local shown: any = { region = nil }
+	r.hud = {
+		setMenuHighlight = function(_, region: any, visible: boolean)
+			shown.region = if visible then region else nil
+		end,
+		setThumb = function() end,
+		setWaiting = function() end,
+	}
+	r:setInputType("Keyboard")
+	return r, s, b, ctx, shown
+end
+check("mouse hover shares filtered choices and clears stale regions", function()
+	local r, _, _, ctx, shown = menuFixture()
+	assert(table.concat(r:getAvailableChoices(ctx), ",") == "1,3,7")
+	r:pointerMove("mouse", 0.4, 0.33)
+	assert(r.hoveredDigit == 3 and r.selected == 2 and shown.region.digit == 3)
+	r:pointerMove("mouse", 0.9, 0.9)
+	assert(r.hoveredDigit == nil and shown.region == nil)
+	r:pointerMove("mouse", 0.4, 0.33)
+	ctx.choices = { 1, 7 }
+	r:updateMenuHighlight(ctx)
+	assert(r.hoveredDigit == nil and shown.region == nil)
+	ctx.choices = { 1, 3, 5, 7 }
+	r:pointerMove("mouse", 0.4, 0.33)
+	ctx.regions[2].y = 0.6
+	r:updateMenuHighlight(ctx)
+	assert(r.hoveredDigit == nil and shown.region == nil)
+	r.machine.cpu.waitingForKey = false
+	r:pointerMove("mouse", 0.4, 0.22)
+	assert(shown.region == nil)
+end)
+check("keyboard selector wraps, confirms once, and manual keypad input takes over", function()
+	local r, s, b, _, shown = menuFixture()
+	r:keyboardEvent("Down", true)
+	r:keyboardEvent("Down", false)
+	assert(r.menuNavActive and r.selected == 1 and shown.region.digit == 1)
+	assert(not s.held.Down and pop(b) == nil)
+	r:keyboardEvent("Up", true)
+	r:keyboardEvent("Up", false)
+	assert(r.selected == 3 and shown.region.digit == 7)
+	r:keyboardEvent("Right", true)
+	r:keyboardEvent("Right", false)
+	assert(r.selected == 1)
+	r:keyboardEvent("KeypadEnter", true)
+	r:keyboardEvent("KeypadEnter", false)
+	assert(not r.menuNavActive and shown.region == nil and #r.queue == 2)
+	flush(r)
+	assert(pop(b) == 0x0231 and pop(b) == 0x1c0d and pop(b) == nil)
+	r.machine.cpu.waitingForKey = true
+	r:keyboardEvent("Down", true)
+	r:keyboardEvent("Down", false)
+	r:keyboardEvent("KeypadSeven", true)
+	r:keyboardEvent("KeypadSeven", false)
+	r:keyboardEvent("Return", true)
+	r:keyboardEvent("Return", false)
+	assert(not r.menuNavActive and #r.queue == 0)
+	assert(pop(b) == 0x0837 and pop(b) == 0x1c0d and pop(b) == nil)
+end)
+check("hover and keyboard hand off, navigation resets on gameplay and assist disable", function()
+	local r, s, b, ctx, shown = menuFixture()
+	r:pointerMove("mouse", 0.4, 0.33)
+	r:keyboardEvent("Down", true)
+	r:keyboardEvent("Down", false)
+	assert(r.selected == 3 and r.menuNavActive and r.hoveredDigit == nil and shown.region.digit == 7)
+	r:pointerMove("mouse", 0.4, 0.22)
+	assert(not r.menuNavActive and r.selected == 1 and shown.region.digit == 1)
+	r:keyboardEvent("Left", true)
+	r:keyboardEvent("Left", false)
+	ctx.kind = "gameplay"
+	r:update(0)
+	assert(not r.menuNavActive and r.hoveredDigit == nil and shown.region == nil)
+	r:keyboardEvent("Left", true)
+	assert(s.held.Left and pop(b) == 0x4b00)
+	r:keyboardEvent("Left", false)
+	ctx.kind = "prompt"
+	r.machine.cpu.waitingForKey = true
+	r:keyboardEvent("Down", true)
+	r:keyboardEvent("Down", false)
+	r:setMenuAssist(false)
+	assert(not r.menuNavActive and shown.region == nil)
+	r:keyboardEvent("Up", true)
+	assert(s.held.Up and pop(b) == 0x4800)
+	r:keyboardEvent("Up", false)
+end)
+check("left stick menu navigation is edge triggered with neutral hysteresis", function()
+	local r, s, b, ctx, shown = menuFixture()
+	r:setInputType("Gamepad1")
+	r:gamepadAxis("Thumbstick1", 0, -0.8)
+	assert(r.selected == 2 and shown.region.digit == 3)
+	for _ = 1, 20 do
+		r:gamepadAxis("Thumbstick1", 0.8, -0.9)
+	end
+	assert(r.selected == 2 and not s.held.Down and not s.held.Right and pop(b) == nil)
+	r:gamepadAxis("Thumbstick1", 0, -0.4)
+	r:gamepadAxis("Thumbstick1", 0, -0.8)
+	assert(r.selected == 2)
+	r:gamepadAxis("Thumbstick1", 0, 0.2)
+	r:gamepadAxis("Thumbstick1", 0, -0.8)
+	assert(r.selected == 3)
+	r:gamepadAxis("Thumbstick1", 0, 0.8)
+	assert(r.selected == 2)
+	r:gamepadButton("ButtonA", true)
+	assert(r.queue[1][2] == 51 and r.queue[2][2] == 13)
+	r.queue = {}
+	ctx.menu = false
+	r.machine.cpu.waitingForKey = false
+	r:gamepadAxis("Thumbstick1", 0.8, -0.8)
+	assert(r.stickMenuDir == 0 and s.held.Down and s.held.Right)
+	r:gamepadAxis("Thumbstick1", 0, 0)
+	assert(not s.held.Down and not s.held.Right)
+	r.machine.cpu.waitingForKey = true
+	ctx.menu = true
+	ctx.regions = {}
+	r:update(0)
+	assert(not r.menuNavActive and shown.region == nil)
 end)
 print("input tests passed:", count)

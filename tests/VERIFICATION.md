@@ -8,7 +8,7 @@ Verified on Windows with Bun 1.3.4, Lune 0.10.4, and official Luau CLI 0.744.
 | `bun run test:runtime` | 34 checks, zero failures |
 | `bun run test:performance` | 5 REP parity and safety groups pass |
 | `bun run test:video` | 9 raster, display-setting and text-region checks pass |
-| `bun run test:input` | 14 routing, focus, assist and device checks pass |
+| `bun run test:input` | 18 routing, focus, assist and device checks pass |
 | `bun run test:settings-runtime` | 4 speed, gain, initialization and legacy keyboard checks pass |
 | `bun run test:settings` | Setting dispatch, shortcuts and touch override checks pass |
 | `bun run test:player-isolation` | Sound, Humanoid, emote state and cleanup checks pass |
@@ -76,6 +76,11 @@ draws a choice outline and confirms with A. Injected I/O keyboard events appear
 as `io` at the guest name prompt. The native TextBox focus/FocusLost bridge
 submitted `asher` into the guest, with normal key injection suppressed during
 TextBox focus. Physical mobile and console keyboards were not tested.
+The shared selector was checked with injected keyboard arrows and Enter,
+advancing from the main menu to professions. Native mouse-movement events
+showed the hover outline and cleared it on exit. Simulated stick tests cover
+neutral hysteresis, direction changes and raw directional fallback outside
+menus; a physical thumbstick was not tested.
 The final production LocalScript boots without privileged diagnostic helpers.
 Its camera remains Scriptable after a competing type change, the emote wheel
 stays disabled after the Period shortcut, local character Sound volumes are

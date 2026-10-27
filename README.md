@@ -39,7 +39,10 @@ Left touch drag holds directional keys by default. Screen assist is opt-in:
 numbered menu clicks, continue taps, gamepad choice highlighting and the waiting
 quick bar are disabled for the generic runtime. The `--oregon` build enables
 them explicitly. Menu assist can also be toggled in settings. With it enabled,
-D-pad moves the choice outline and A confirms the selected digit plus Enter.
+D-pad and the left thumbstick move the choice outline; A confirms the selected
+digit plus Enter. Mouse hover also outlines a choice. On PC, the first arrow
+press activates the selector, subsequent arrows wrap through choices, and Enter
+confirms. Typing a digit or Backspace returns to manual entry.
 The Type button opens the platform keyboard where supported. Force On/Off touch
 overrides are available in settings; they do not enable menu assist.
 
