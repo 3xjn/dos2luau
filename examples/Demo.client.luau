@@ -16,7 +16,8 @@ local gui = hud.gui
 local machine = DOS.new({
 	imageLabel = hud.imageLabel,
 	-- DOS2LUAU_PROGRAM_OPTIONS
-	-- speakerAssetId='rbxassetid://YOUR_ASSET_ID',
+	speakerAssetId = "rbxassetid://9040512330",
+	oplAssetId = "rbxassetid://9040512197",
 })
 local input = VirtualInputRouter.new(machine, {
 	-- DOS2LUAU_INPUT_OPTIONS

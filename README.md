@@ -57,11 +57,12 @@ modes. The example disables local avatar movement, jumping, character sounds and
 the emote wheel, and uses a scriptable camera while active. Cleanup restores
 the prior character/UI state. DOS audio remains separately controlled.
 
-The demo generates `examples/square-440.wav`. Upload that waveform to an
-account/experience with audio permission, then set `speakerAssetId` in the
-example to its asset ID. Without it, the runtime uses Roblox's bundled
-`uuhhh.mp3` as an audible fallback; its timbre is approximate. `oplAssetId` supplies the looping
-waveform for the approximate nine-voice instrument pool. PCM playback maps
+The runtime and demo default to `rbxassetid://9040512330` for the PC speaker's
+440 Hz square wave and `rbxassetid://9040512197` for the approximate nine-voice
+OPL2 pool's 440 Hz sine wave. Both use frequency / 440 pitch modulation.
+Override `speakerAssetId` or `oplAssetId` to supply your own looped waveforms;
+`examples/square-440.wav` is also available to upload. Headless runs do not create
+default sounds. PCM playback maps
 FNV-1a sample hashes to separately supplied Roblox audio assets.
 Short speaker pulses retain at least a 50 ms hold, and Turbo temporarily uses
 XT instruction pacing while the speaker gate is active.

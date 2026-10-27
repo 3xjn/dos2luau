@@ -2,9 +2,11 @@
 -- PC speaker, a lightweight OPL2 approximation, and Sound Blaster DMA playback.
 local Audio = {}
 Audio.__index = Audio
--- Supply a looped 440 Hz waveform for faithful PC-speaker timbre.
-local DEFAULT_SPEAKER_ASSET = "rbxasset://sounds/uuhhh.mp3"
+-- Separate 440 Hz waveforms for PC-speaker and approximate OPL2 playback.
+local DEFAULT_SPEAKER_ASSET = "rbxassetid://9040512330"
+local DEFAULT_OPL_ASSET = "rbxassetid://9040512197"
 Audio.DEFAULT_SPEAKER_ASSET = DEFAULT_SPEAKER_ASSET
+Audio.DEFAULT_OPL_ASSET = DEFAULT_OPL_ASSET
 local function sound(asset: any, looped: boolean, provided: any): any
 	if provided then
 		return provided
@@ -31,7 +33,15 @@ local function hash(bus: any, page: number, address: number, count: number): num
 	return h
 end
 function Audio.new(bus: any, options: any): any
-	options = options or {}
+	options = table.clone(options or {})
+	if not options.headless then
+		if options.speakerAssetId == nil then
+			options.speakerAssetId = DEFAULT_SPEAKER_ASSET
+		end
+		if options.oplAssetId == nil then
+			options.oplAssetId = DEFAULT_OPL_ASSET
+		end
+	end
 	local self: any = setmetatable({
 		bus = bus,
 		masterGain = 1,
@@ -64,8 +74,7 @@ function Audio.new(bus: any, options: any): any
 		pcm = nil,
 	}, Audio)
 	if not options.headless or options.speakerSound or options.oplSounds or options.pcmSound then
-		local fallback = if options.headless then nil else DEFAULT_SPEAKER_ASSET
-		self.speaker = sound(options.speakerAssetId or fallback, true, options.speakerSound)
+		self.speaker = sound(options.speakerAssetId, true, options.speakerSound)
 		if self.speaker and not options.speakerSound then
 			self.speaker.Name = "DOSPCSpeaker"
 		end
@@ -73,7 +82,7 @@ function Audio.new(bus: any, options: any): any
 		for i = 1, 9 do
 			self.voices[i] = {
 				sound = sound(
-					options.oplAssetId or fallback,
+					options.oplAssetId,
 					true,
 					if options.oplSounds then options.oplSounds[i] else nil
 				),
