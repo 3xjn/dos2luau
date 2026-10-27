@@ -1,5 +1,5 @@
 {
   "languageMode": "strict",
-  "globals": ["game", "script", "Instance", "Enum", "Vector2", "Content", "Color3", "UDim2"],
+  "globals": ["game", "script", "Instance", "Enum", "Vector2", "Content", "Color3", "UDim2", "UDim", "TweenInfo"],
   "lint": {"LocalUnused": false, "FunctionUnused": false}
 }

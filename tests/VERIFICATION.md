@@ -4,8 +4,14 @@ Verified on Windows with Bun 1.3.4, Lune 0.10.4, and official Luau CLI 0.744.
 
 | Check | Result |
 | --- | --- |
-| `bun test compiler` | 35 tests, 221 assertions, zero failures |
+| `bun test compiler` | 37 tests, 452 assertions, zero failures |
 | `bun run test:runtime` | 34 checks, zero failures |
+| `bun run test:performance` | 5 REP parity and safety groups pass |
+| `bun run test:video` | 9 raster, display-setting and text-region checks pass |
+| `bun run test:input` | 14 routing, focus, assist and device checks pass |
+| `bun run test:settings-runtime` | 4 speed, gain, initialization and legacy keyboard checks pass |
+| `bun run test:settings` | Setting dispatch, shortcuts and touch override checks pass |
+| `bun run test:player-isolation` | Sound, Humanoid, emote state and cleanup checks pass |
 | `bun run check:luau` | Generated/runtime modules compile and pass strict analysis |
 | `lune run tests/model.luau` | Default model structure and binary serialization pass |
 | `lune run tests/model.luau dist/dos2luau-oregon.rbxmx` | Oregon model structure and binary serialization pass |
@@ -22,12 +28,12 @@ trail”, selects the banker profession, and reaches the wagon-leader naming
 prompt. Actual guest instructions run; the display is rasterized from VRAM.
 
 - Executed instructions in both runs: **6,173,864**.
-- Directly lifted instructions executed by the AOT build: **1,166,917**.
-- Interpreted instructions in that build: **5,006,947**.
+- Directly lifted instructions executed by the AOT build: **1,358,986**.
+- Interpreted instructions in that build: **4,814,878**.
 - Compared RAM: **1,048,576 bytes**.
 - Compared VGA framebuffer: **256,000 bytes** (320 × 200 × RGBA).
-- Static discovery: **35,925 blocks**, including **11,546 direct blocks**,
-  emitted in **57 chunks**, each below 180,000 source characters. This is
+- Static discovery: **35,925 blocks**, including **21,345 direct blocks**,
+  emitted in **65 chunks**, each below 180,000 source characters. This is
   discovery coverage, not complete execution. Embedded images, assets and
   metadata also use bounded sibling modules to satisfy Studio's 200,000-character
   source-property limit.
@@ -61,6 +67,47 @@ captures were inspected. No DOS runtime errors occurred during these scenarios.
 The import contains 35,925 compiled instruction blocks and reconstructs the
 145,168-byte program image and 321,139-byte OTMCGA.PCL asset. The HTTP setting
 used for local transfer was restored to its original disabled value after import.
+
+The updated UI was also checked in the live client: black bars cover the 3D
+world in 4:3 mode; aspect/filter choices persist through repeated video mode
+changes; integer scaling responds to viewport changes; F10 and Right Control +
+comma toggle the modal without selecting a DOS choice. Simulated gamepad input
+draws a choice outline and confirms with A. Injected I/O keyboard events appear
+as `io` at the guest name prompt. The native TextBox focus/FocusLost bridge
+submitted `asher` into the guest, with normal key injection suppressed during
+TextBox focus. Physical mobile and console keyboards were not tested.
+The final production LocalScript boots without privileged diagnostic helpers.
+Its camera remains Scriptable after a competing type change, the emote wheel
+stays disabled after the Period shortcut, local character Sound volumes are
+zero, and the Humanoid's movement/jump settings are disabled. Optional restricted
+Roblox event subscriptions are guarded so they cannot abort startup.
+
+## Performance and input regressions
+
+REP tests compare both directions, all ten string forms, comparison termination,
+overlap and offset wrapping, ROM, unknown hooks, code invalidation, Mode X, and
+deadline resumption. Video tests cover raster pixels, cursor/blink, current text
+regions and settings persistence. Input tests cover queue backpressure,
+independent held sources, controller mappings, calibration/turbo, stale context,
+direct InputObject-to-GuiObject coordinate normalization, processed keyboard
+events with TextBox focus, opt-in screen assist and last-input-type touch gating.
+
+Local Lune microbenchmarks on this machine (30 renders per video mode) compare
+the previous GitHub snapshot with the optimized raster, with identical pixels:
+
+| Operation | Previous | Optimized | Ratio |
+| --- | --- | --- | --- |
+| Mode 03h text raster | 64.00 ms | 1.46 ms | 43.8x |
+| Mode 04h CGA raster | 9.99 ms | 0.50 ms | 19.9x |
+| Mode 06h CGA raster | 9.73 ms | 0.77 ms | 12.6x |
+| Mode 13h VGA raster | 4.89 ms | 0.20 ms | 24.6x |
+| Ten 32,000-word STOSW clears | 229.72 ms | 1.13 ms | 203.6x |
+
+These are host microbenchmarks, not Roblox FPS or a guarantee of one-frame guest
+drawing. Guest drawing loops, image upload and platform limits still contribute.
+Graphics menu recognition detects choices 1–6 and 1–4 in the captured Oregon
+menus. Labels are approximate, and the real game's BGI continue-prompt font has
+not been verified. Synthetic CP437 SPACE/continue recognition passes.
 
 This record does not establish a full Oregon playthrough, audible audio
 playback, sustained Roblox frame-time performance, or DOOM /

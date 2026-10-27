@@ -1,9 +1,9 @@
 --!strict
 return {
 	format = "coff", packing = nil, mode32 = true, imageBase = 4096,
-	image = "\184\255\255\255\127\005\001\000\000\000\187\000\000\002\000\137\003\244",
 	entryCS = 0, entryIP = 4096, initialSS = 0, initialSP = 524288,
 	minExtraParagraphs = 0, maxExtraParagraphs = 0,
+	image = "\184\255\255\255\127\005\001\000\000\000\187\000\000\002\000\137\003\244",
 	relocations = {},
 	warnings = {},
 	directBlocks = {

@@ -17,9 +17,15 @@ function DOS.new(options: any?): any
 	local assets: any = opts.assets or require(script.Out.VFS_Assets)
 	local cpu: any = CPUState.new()
 	local bus: any = Bus.new(if meta.mode32 then 32 * 1024 * 1024 else nil)
-	local video: any = Video.new(bus, { imageLabel = opts.imageLabel, headless = opts.headless })
+	local video: any = Video.new(bus, {
+		imageLabel = opts.imageLabel,
+		headless = opts.headless,
+		aspectMode = opts.aspectMode,
+		resampleMode = opts.resampleMode,
+	})
 	local audio: any = Audio.new(bus, {
 		headless = opts.headless,
+		masterGain = opts.masterGain,
 		speakerAssetId = opts.speakerAssetId,
 		oplAssetId = opts.oplAssetId,
 		pcmAssets = opts.pcmAssets,
@@ -35,11 +41,14 @@ function DOS.new(options: any?): any
 	dispatcher:initialize(cpu, bus)
 	local scheduler: any = Scheduler.new(cpu, bus, dispatcher, {
 		headless = opts.headless,
+		deterministic = opts.deterministic,
+		turboVideo = opts.turboVideo,
 		audio = audio,
 		video = video,
 		instructionsPerSecond = opts.instructionsPerSecond,
 		maxInstructionsPerFrame = opts.maxInstructionsPerFrame,
 		frameBudgetSeconds = opts.frameBudgetSeconds,
+		speedPreset = opts.speedPreset,
 	})
 	hle.input = scheduler
 	local machine: any = {
@@ -53,21 +62,31 @@ function DOS.new(options: any?): any
 		scheduler = scheduler,
 	}
 	function machine:start()
+		if scheduler.inputRouter then
+			scheduler.inputRouter:start()
+		end
 		scheduler:start()
 	end
 	function machine:step(dt: number)
 		scheduler:step(dt)
 	end
 	function machine:stop()
+		if scheduler.inputRouter then
+			scheduler.inputRouter:stop()
+		end
 		scheduler:stop()
 	end
 	function machine:destroy()
+		if self.destroyed then
+			return
+		end
+		self.destroyed = true
+		if scheduler.inputRouter then
+			scheduler.inputRouter:destroy()
+		end
 		scheduler:destroy()
 		audio:destroy()
-		if video.image then
-			video.image:Destroy()
-			video.image = nil
-		end
+		video:destroy()
 	end
 	function machine:exportTrace(): any
 		local keys: { number } = {}

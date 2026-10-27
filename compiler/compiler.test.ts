@@ -664,3 +664,111 @@ test("large generated sources stay under Studio limits and preserve binary data"
     await rm(root, { recursive: true, force: true });
   }
 });
+test("direct stack, ALU, shifts, call, return and memory load match interpreter at budget one", async () => {
+  if (!Bun.which("lune")) return;
+  const root = await mkdtemp(join(tmpdir(), "dos2luau-parity-"));
+  try {
+    for (const n of ["CPUState", "Bus", "Interpreter"]) {
+      let source = await readFile(
+        join(process.cwd(), "runtime", `${n}.luau`),
+        "utf8",
+      );
+      source = source.replaceAll(
+        "require(script.Parent.CPUState)",
+        'require("./CPUState")',
+      );
+      await writeFile(join(root, `${n}.luau`), source);
+    }
+    const cases = [
+      [0x50],
+      [0x54],
+      [0x58],
+      [0x5c],
+      [0x80, 0xc0, 0xff],
+      [0x81, 0xe8, 0x34, 0x12],
+      [0x83, 0xd8, 0xff],
+      [0x83, 0xf8, 0x80],
+      [0xd0, 0xe0],
+      [0xd0, 0xe8],
+      [0xd0, 0xf8],
+      [0xd1, 0xe0],
+      [0xd1, 0xe8],
+      [0xd1, 0xf8],
+      [0xe8, 0, 0],
+      [0xc3],
+      [0xc2, 0x04, 0],
+      [0x8a, 0x46, 0xff],
+      [0x8b, 0x06, 0xff, 0xff],
+    ];
+    const rows: string[] = [];
+    for (let i = 0; i < cases.length; i++) {
+      const path = join(root, `F${i}`);
+      await compile(parseProgram(Uint8Array.from(cases[i]!)), path);
+      const blockPath = join(path, "Blocks_001.luau");
+      let source = await readFile(blockPath, "utf8");
+      source = source
+        .replaceAll(
+          "require(script.Parent.Parent.CPUState)",
+          'require("../CPUState")',
+        )
+        .replaceAll(
+          "require(script.Parent.Parent.Interpreter)",
+          'require("../Interpreter")',
+        );
+      await writeFile(blockPath, source);
+      rows.push(
+        `{blocks = require("./F${i}/Blocks_001"), bytes = {${cases[i]!.join(",")}}}`,
+      );
+    }
+    const script = `local CPU = require("./CPUState")\nlocal Bus = require("./Bus")\nlocal Interpreter = require("./Interpreter")\nlocal cases = {${rows.join(",")}}\nfor ci, case in cases do\n for _,value in {0,1,127,128,255,32767,32768,65535} do\n  local function create()\n   local c=CPU.new(0x1000);c.cs=0x1000;c.ds=0x1100;c.ss=0x1200;c.ip=0x100;c.flags=0x0ad7\n   for r=0,7 do CPU.setReg(c,r,16,if r==4 then 1 elseif r==5 then 0 else value) end\n   local b=Bus.new();for n,v in case.bytes do b:write8(0x10000+0xff+n,v) end\n   b:writeSeg16(c.ss,1,0xa55a);b:writeSeg16(c.ss,65535,0x2345);b:writeSeg16(c.ds,65535,0xbeef)\n   return c,b\n  end\n  local a,x=create();local c,y=create();local next,remaining=case.blocks[256](a,x,1);local expected,cost=Interpreter.step(c,y)\n  assert(remaining==0 and cost==1 and next==expected, 'next/cost '..ci)\n  assert(a.ip==c.ip and a.flags==c.flags, 'ip/flags '..ci..' value '..value)\n  assert(buffer.tostring(a.regs)==buffer.tostring(c.regs), 'regs '..ci..' value '..value)\n  assert(buffer.tostring(x.ram)==buffer.tostring(y.ram), 'memory '..ci..' value '..value)\n end\nend\nprint("parity passed")\n`;
+    const scriptPath = join(root, "run.luau");
+    await writeFile(scriptPath, script);
+    const result = Bun.spawnSync(["lune", "run", scriptPath]);
+    expect(result.exitCode).toBe(0);
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+test("64-instruction direct chains preserve every budget checkpoint", async () => {
+  if (!Bun.which("lune")) return;
+  const root = await mkdtemp(join(tmpdir(), "dos2luau-chain-"));
+  try {
+    for (const n of ["CPUState", "Bus", "Interpreter"]) {
+      let s = await readFile(
+        join(process.cwd(), "runtime", `${n}.luau`),
+        "utf8",
+      );
+      s = s.replaceAll(
+        "require(script.Parent.CPUState)",
+        'require("./CPUState")',
+      );
+      await writeFile(join(root, `${n}.luau`), s);
+    }
+    const bytes: number[] = [0xb8, 0xff, 0x7f];
+    for (let n = 0; n < 31; n++) bytes.push(0x83, 0xc0, 0xff, 0xd1, 0xe8);
+    bytes.push(0x3d, 0x12, 0x34, 0x74, 0x00, 0xf4);
+    const out = join(root, "Out");
+    await compile(parseProgram(Uint8Array.from(bytes)), out);
+    const file = join(out, "Blocks_001.luau");
+    let block = await readFile(file, "utf8");
+    block = block
+      .replaceAll(
+        "require(script.Parent.Parent.CPUState)",
+        'require("../CPUState")',
+      )
+      .replaceAll(
+        "require(script.Parent.Parent.Interpreter)",
+        'require("../Interpreter")',
+      );
+    await writeFile(file, block);
+    const script = `local CPU=require('./CPUState')\nlocal Bus=require('./Bus')\nlocal I=require('./Interpreter')\nlocal blocks=require('./Out/Blocks_001')\nlocal bytes={${bytes.join(",")}}\nfor budget=1,64 do\n local function create() local c=CPU.new(4096);c.cs=4096;c.ip=256;c.flags=0xad7;local b=Bus.new();for n,v in bytes do b:write8(65535+256+n,v) end;return c,b end\n local a,x=create();local c,y=create();local next,remaining=blocks[256](a,x,budget);for _=1,budget-remaining do I.step(c,y) end\n assert(next==CPU.key(c) and a.ip==c.ip and a.flags==c.flags and buffer.tostring(a.regs)==buffer.tostring(c.regs), 'budget '..budget)\nend\nprint('chain parity passed')\n`;
+    const fileScript = join(root, "run.luau");
+    await writeFile(fileScript, script);
+    const result = Bun.spawnSync(["lune", "run", fileScript]);
+    expect(new TextDecoder().decode(result.stderr)).toBe("");
+    expect(result.exitCode).toBe(0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);

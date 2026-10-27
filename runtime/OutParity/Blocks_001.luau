@@ -5,22 +5,30 @@ local Interpreter = require(script.Parent.Parent.Interpreter)
 local blocks: {[number]: (any, any, number) -> (number, number)} = {}
 blocks[256] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
+	do
 	CPU.setReg(cpu, 0, 16, 32767)
+	end
 	cpu.ip = 259
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 0, 16, CPU.alu(cpu, "add", CPU.getReg(cpu, 0, 16), 1, 16))
+	end
 	cpu.ip = 262
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 3, 16, 65535)
+	end
 	cpu.ip = 265
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 3, 16, CPU.alu(cpu, "inc", CPU.getReg(cpu, 3, 16), 1, 16))
+	end
 	cpu.ip = 266
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
@@ -39,17 +47,23 @@ end
 
 blocks[259] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
+	do
 	CPU.setReg(cpu, 0, 16, CPU.alu(cpu, "add", CPU.getReg(cpu, 0, 16), 1, 16))
+	end
 	cpu.ip = 262
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 3, 16, 65535)
+	end
 	cpu.ip = 265
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 3, 16, CPU.alu(cpu, "inc", CPU.getReg(cpu, 3, 16), 1, 16))
+	end
 	cpu.ip = 266
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
@@ -68,12 +82,16 @@ end
 
 blocks[262] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
+	do
 	CPU.setReg(cpu, 3, 16, 65535)
+	end
 	cpu.ip = 265
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 3, 16, CPU.alu(cpu, "inc", CPU.getReg(cpu, 3, 16), 1, 16))
+	end
 	cpu.ip = 266
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
@@ -93,7 +111,9 @@ end
 blocks[265] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
 	if budget >= 2 then
+	do
 	CPU.setReg(cpu, 3, 16, CPU.getReg(cpu, 3, 16) + 1)
+	end
 	cpu.ip = 266
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
@@ -108,7 +128,9 @@ blocks[265] = function(cpu: any, bus: any, budget: number): (number, number)
 	cpu.currentBlockKey = CPU.key(cpu)
 	return cpu.currentBlockKey, budget - 1
 else
+	do
 	CPU.setReg(cpu, 3, 16, CPU.alu(cpu, "inc", CPU.getReg(cpu, 3, 16), 1, 16))
+	end
 	cpu.ip = 266
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
@@ -171,12 +193,16 @@ end
 
 blocks[277] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
+	do
 	CPU.setReg(cpu, 1, 16, 5)
+	end
 	cpu.ip = 280
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 1, 16, CPU.alu(cpu, "dec", CPU.getReg(cpu, 1, 16), 1, 16))
+	end
 	cpu.ip = 281
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1

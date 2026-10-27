@@ -31,6 +31,8 @@ function Audio.new(bus: any, options: any): any
 	options = options or {}
 	local self: any = setmetatable({
 		bus = bus,
+		masterGain = 1,
+		speakerBaseVolume = 0,
 		options = options,
 		pendingIRQ = nil,
 		pitDivisor = 0,
@@ -159,7 +161,25 @@ function Audio.new(bus: any, options: any): any
 			table.insert(self.dspQueue, 0xaa)
 		end
 	end)
+	if options.masterGain ~= nil then
+		self:setMasterGain(options.masterGain)
+	end
 	return self
+end
+function Audio.setMasterGain(self: any, gain: number)
+	assert(gain == gain, "Master gain must be a number")
+	self.masterGain = math.clamp(gain, 0, 1)
+	if self.speaker then
+		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
+	end
+	if self.pcm then
+		self.pcm.Volume = if self.dspSpeaker then self.masterGain else 0
+	end
+	for _, voice in ipairs(self.voices) do
+		if voice.sound then
+			voice.sound.Volume = (voice.baseVolume or 0) * self.masterGain
+		end
+	end
 end
 function Audio.startDMA(self: any, length: number, auto: boolean)
 	local count = math.min(length, self.dmaCount + 1)
@@ -177,7 +197,7 @@ function Audio.startDMA(self: any, length: number, auto: boolean)
 		if self.pcm then
 			self.pcm.SoundId = tostring(id)
 			self.pcm.Looped = auto
-			self.pcm.Volume = if self.dspSpeaker then 1 else 0
+			self.pcm.Volume = if self.dspSpeaker then self.masterGain else 0
 			self.pcm:Play()
 		end
 	elseif self.options.onUnknownPCM then
@@ -215,7 +235,7 @@ function Audio.dspWrite(self: any, v: number)
 	elseif v == 0xd1 then
 		self.dspSpeaker = true
 		if self.pcm then
-			self.pcm.Volume = 1
+			self.pcm.Volume = self.masterGain
 		end
 	elseif v == 0xd3 then
 		self.dspSpeaker = false
@@ -238,11 +258,12 @@ function Audio.updateSpeaker(self: any)
 	local frequency = 1193182 / divisor
 	if self.speaker then
 		self.speaker.PlaybackSpeed = math.clamp(frequency / 440, 0.01, 20)
-		self.speaker.Volume = if bit32.band(self.port61, 3) == 3
+		self.speakerBaseVolume = if bit32.band(self.port61, 3) == 3
 				and frequency >= 20
 				and frequency <= 8800
 			then 0.2
 			else 0
+		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
 	end
 end
 local carrierSlots = { 3, 4, 5, 11, 12, 13, 19, 20, 21 }
@@ -284,7 +305,8 @@ function Audio.update(self: any, dt: number, _cpu: any)
 		end
 		if voice.sound then
 			voice.sound.PlaybackSpeed = math.clamp(frequency / 440, 0.01, 20)
-			voice.sound.Volume = voice.level * 10 ^ (-0.75 * total / 20) * 0.15
+			voice.baseVolume = voice.level * 10 ^ (-0.75 * total / 20) * 0.15
+			voice.sound.Volume = voice.baseVolume * self.masterGain
 		end
 	end
 	if self.dmaRemaining > 0 and not self.dmaPaused and not self.dmaMasked then
@@ -304,7 +326,8 @@ function Audio.update(self: any, dt: number, _cpu: any)
 end
 function Audio.bell(self: any)
 	if self.speaker then
-		self.speaker.Volume = 0.2
+		self.speakerBaseVolume = 0.2
+		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
 	end
 end
 function Audio.destroy(self: any)

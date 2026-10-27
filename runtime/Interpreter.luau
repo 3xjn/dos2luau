@@ -2,6 +2,7 @@
 --!native
 local CPU = require(script.Parent.CPUState)
 local I = {}
+local OPS = { "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp" }
 local function push(c: any, b: any, v: any, width: any?)
 	width = width or 16
 	local sw = if c.mode32 then 32 else 16
@@ -62,6 +63,189 @@ local function signed(v: any, w: any)
 		return v
 	end
 end
+local function phys(c: any, s: any, off: any): number
+	if c.mode32 then
+		return (((c.segmentBases and c.segmentBases[s]) or 0) + off) % 4294967296
+	else
+		return (s * 16 + off) % 1048576
+	end
+end
+local function fetch(c: any, b: any): number
+	local v = b:read8(phys(c, c.cs, c.ip))
+	c.ip = (c.ip + 1) % (if c.mode32 then 4294967296 else 65536)
+	return v
+end
+local function word(c: any, b: any): number
+	local lo = fetch(c, b)
+	return lo + fetch(c, b) * 256
+end
+local function imm(c: any, b: any, width: number): number
+	if width == 8 then
+		return fetch(c, b)
+	elseif width == 16 then
+		return word(c, b)
+	else
+		local lo = word(c, b)
+		return lo + word(c, b) * 65536
+	end
+end
+local function fail(op: any, cs: any, ip: any)
+	error(string.format("Unsupported instruction %02X at %04X:%04X", op, cs, ip), 0)
+end
+local function modrm(c: any, b: any, seg: any, addr32: any, width: any): (number, any, any, any, any)
+	local m = fetch(c, b)
+	local mode = math.floor(m / 64)
+	local reg = math.floor(m / 8) % 8
+	local rm = m % 8
+	if mode == 3 then
+		return reg, rm, nil, nil, nil
+	end
+	local base = 0
+	local usesBP = false
+	if addr32 then
+		if rm == 4 then
+			local sib = fetch(c, b)
+			local scale = 2 ^ math.floor(sib / 64)
+			local index = math.floor(sib / 8) % 8
+			local basereg = sib % 8
+			if index ~= 4 then
+				base += CPU.getReg(c, index, 32) * scale
+			end
+			if basereg == 5 and mode == 0 then
+				base += imm(c, b, 32)
+			else
+				base += CPU.getReg(c, basereg, 32)
+				usesBP = basereg == 4 or basereg == 5
+			end
+		elseif rm == 5 and mode == 0 then
+			base = imm(c, b, 32)
+		else
+			base = CPU.getReg(c, rm, 32)
+			usesBP = rm == 5
+		end
+		if mode == 1 then
+			base += signed(fetch(c, b), 8)
+		elseif mode == 2 then
+			base += signed(imm(c, b, 32), 32)
+		end
+	else
+		local bx = CPU.getReg(c, 3, 16)
+		local bp = CPU.getReg(c, 5, 16)
+		local si = CPU.getReg(c, 6, 16)
+		local di = CPU.getReg(c, 7, 16)
+		base = if rm == 0
+			then bx + si
+			elseif rm == 1 then bx + di
+			elseif rm == 2 then bp + si
+			elseif rm == 3 then bp + di
+			elseif rm == 4 then si
+			elseif rm == 5 then di
+			elseif rm == 6 then bp
+			else bx
+		usesBP = rm == 2 or rm == 3 or (rm == 6 and mode ~= 0)
+		if mode == 0 and rm == 6 then
+			base = word(c, b)
+		elseif mode == 1 then
+			base += signed(fetch(c, b), 8)
+		elseif mode == 2 then
+			base += signed(word(c, b), 16)
+		end
+	end
+	local addressMod = if addr32 then 4294967296 else 65536
+	local off = base % addressMod
+	local s = seg or (if usesBP then c.ss else c.ds)
+	return reg, nil, s, off, addressMod
+end
+local function readOperand(c: any, b: any, width: number, reg: any, seg: any, off: any, mod: any): number
+	if reg ~= nil then
+		return CPU.getReg(c, reg, width)
+	end
+	local v = 0
+	for i = 0, width / 8 - 1 do
+		v += b:read8(phys(c, seg, (off + i) % mod)) * 2 ^ (8 * i)
+	end
+	return v
+end
+local function writeOperand(c: any, b: any, width: number, reg: any, seg: any, off: any, mod: any, v: number)
+	if reg ~= nil then
+		CPU.setReg(c, reg, width, v)
+	else
+		for i = 0, width / 8 - 1 do
+			b:write8(phys(c, seg, (off + i) % mod), math.floor(v / 2 ^ (8 * i)) % 256)
+		end
+	end
+end
+local function fpGet(c: any, i: number): number
+	local v = c.fpu[(c.fpuTop + i) % 8 + 1]
+	if v == nil then
+		error("x87 stack underflow", 0)
+	end
+	return v
+end
+local function fpPut(c: any, i: number, v: number)
+	c.fpu[(c.fpuTop + i) % 8 + 1] = v
+end
+local function fpPush(c: any, v: number)
+	c.fpuTop = (c.fpuTop - 1) % 8
+	fpPut(c, 0, v)
+end
+local function fpPop(c: any)
+	local v = fpGet(c, 0)
+	c.fpu[c.fpuTop + 1] = nil
+	c.fpuTop = (c.fpuTop + 1) % 8
+	return v
+end
+local function fpCompare(c: any, a: number, v: number)
+	c.fpuStatus = bit32.band(c.fpuStatus or 0, bit32.bnot(0x4500))
+	if a ~= a or v ~= v then
+		c.fpuStatus = bit32.bor(c.fpuStatus, 0x4500)
+	elseif a < v then
+		c.fpuStatus = bit32.bor(c.fpuStatus, 0x100)
+	elseif a == v then
+		c.fpuStatus = bit32.bor(c.fpuStatus, 0x4000)
+	end
+end
+local function cond(c: any, n: any)
+	local f = c.flags
+	local cf = bit32.band(f, 1) ~= 0
+	local pf = bit32.band(f, 4) ~= 0
+	local z = bit32.band(f, 64) ~= 0
+	local s = bit32.band(f, 128) ~= 0
+	local o = bit32.band(f, 2048) ~= 0
+	if n == 0 then
+		return o
+	elseif n == 1 then
+		return not o
+	elseif n == 2 then
+		return cf
+	elseif n == 3 then
+		return not cf
+	elseif n == 4 then
+		return z
+	elseif n == 5 then
+		return not z
+	elseif n == 6 then
+		return cf or z
+	elseif n == 7 then
+		return not cf and not z
+	elseif n == 8 then
+		return s
+	elseif n == 9 then
+		return not s
+	elseif n == 10 then
+		return pf
+	elseif n == 11 then
+		return not pf
+	elseif n == 12 then
+		return s ~= o
+	elseif n == 13 then
+		return s == o
+	elseif n == 14 then
+		return z or s ~= o
+	else
+		return not z and s == o
+	end
+end
 function I.step(c: any, b: any)
 	if b.hle and b.hle:handleTrap(c, b) then
 		c.currentBlockKey = CPU.key(c)
@@ -73,27 +257,12 @@ function I.step(c: any, b: any)
 	local start = c.ip
 	local startCS = c.cs
 	local ipmod = if c.mode32 then 4294967296 else 65536
-	local function phys(s: any, off: any): number
-		if c.mode32 then
-			return (((c.segmentBases and c.segmentBases[s]) or 0) + off) % 4294967296
-		else
-			return (s * 16 + off) % 1048576
-		end
-	end
-	local function fetch()
-		local v = b:read8(phys(c.cs, c.ip))
-		c.ip = (c.ip + 1) % ipmod
-		return v
-	end
-	local function word()
-		local lo = fetch()
-		return lo + fetch() * 256
-	end
+
 	local seg = nil
 	local rep = 0
 	local w32 = c.mode32 == true
 	local addr32 = c.mode32 == true
-	local op = fetch()
+	local op = fetch(c, b)
 	while
 		op == 0x26
 		or op == 0x2e
@@ -126,11 +295,9 @@ function I.step(c: any, b: any)
 		elseif op == 0xf2 or op == 0xf3 then
 			rep = op
 		end
-		op = fetch()
+		op = fetch(c, b)
 	end
-	local function fail()
-		error(string.format("Unsupported instruction %02X at %04X:%04X", op, startCS, start), 0)
-	end
+
 	local ow = if w32 then 32 else 16
 	if
 		(w32 or addr32)
@@ -146,128 +313,17 @@ function I.step(c: any, b: any)
 			or op == 0x9a
 		)
 	then
-		fail()
+		fail(op, startCS, start)
 	end
-	local function imm(width: number): number
-		if width == 8 then
-			return fetch()
-		elseif width == 16 then
-			return word()
-		else
-			local lo = word()
-			return lo + word() * 65536
-		end
-	end
-	local function modrm(width: any): (number, any, any, any)
-		local m = fetch()
-		local mode = math.floor(m / 64)
-		local reg = math.floor(m / 8) % 8
-		local rm = m % 8
-		if mode == 3 then
-			return reg,
-				function()
-					return CPU.getReg(c, rm, width)
-				end,
-				function(v: any)
-					CPU.setReg(c, rm, width, v)
-				end,
-				nil
-		end
-		local base = 0
-		local usesBP = false
-		if addr32 then
-			if rm == 4 then
-				local sib = fetch()
-				local scale = 2 ^ math.floor(sib / 64)
-				local index = math.floor(sib / 8) % 8
-				local basereg = sib % 8
-				if index ~= 4 then
-					base += CPU.getReg(c, index, 32) * scale
-				end
-				if basereg == 5 and mode == 0 then
-					base += imm(32)
-				else
-					base += CPU.getReg(c, basereg, 32)
-					usesBP = basereg == 4 or basereg == 5
-				end
-			elseif rm == 5 and mode == 0 then
-				base = imm(32)
-			else
-				base = CPU.getReg(c, rm, 32)
-				usesBP = rm == 5
-			end
-			if mode == 1 then
-				base += signed(fetch(), 8)
-			elseif mode == 2 then
-				base += signed(imm(32), 32)
-			end
-		else
-			local bx = CPU.getReg(c, 3, 16)
-			local bp = CPU.getReg(c, 5, 16)
-			local si = CPU.getReg(c, 6, 16)
-			local di = CPU.getReg(c, 7, 16)
-			base = ({ bx + si, bx + di, bp + si, bp + di, si, di, bp, bx })[rm + 1]
-			usesBP = rm == 2 or rm == 3 or (rm == 6 and mode ~= 0)
-			if mode == 0 and rm == 6 then
-				base = word()
-			elseif mode == 1 then
-				base += signed(fetch(), 8)
-			elseif mode == 2 then
-				base += signed(word(), 16)
-			end
-		end
-		local addressMod = if addr32 then 4294967296 else 65536
-		local off = base % addressMod
-		local s = seg or (if usesBP then c.ss else c.ds)
-		local function read()
-			local value = 0
-			for i = 0, width / 8 - 1 do
-				value += b:read8(phys(s, (off + i) % addressMod)) * 2 ^ (8 * i)
-			end
-			return value
-		end
-		local function write(v: any)
-			for i = 0, width / 8 - 1 do
-				b:write8(phys(s, (off + i) % addressMod), math.floor(v / 2 ^ (8 * i)) % 256)
-			end
-		end
-		return reg, read, write, { segment = s, offset = off, mod = addressMod }
-	end
-	local function cond(n: any)
-		local f = c.flags
-		local cf = bit32.band(f, 1) ~= 0
-		local pf = bit32.band(f, 4) ~= 0
-		local z = bit32.band(f, 64) ~= 0
-		local s = bit32.band(f, 128) ~= 0
-		local o = bit32.band(f, 2048) ~= 0
-		local tests = {
-			o,
-			not o,
-			cf,
-			not cf,
-			z,
-			not z,
-			cf or z,
-			not cf and not z,
-			s,
-			not s,
-			pf,
-			not pf,
-			s ~= o,
-			s == o,
-			z or s ~= o,
-			not z and s == o,
-		}
-		return tests[n + 1]
-	end
-	local ops = { "add", "or", "adc", "sbb", "and", "sub", "xor", "cmp" }
+
 	if op <= 0x3d and op % 8 <= 5 and math.floor(op / 8) < 8 then
-		local operation = ops[math.floor(op / 8) + 1]
+		local operation = OPS[math.floor(op / 8) + 1]
 		local form = op % 8
 		local width = if form % 2 == 0 then 8 elseif w32 then 32 else 16
 		if form < 4 then
-			local reg, read, write = modrm(width)
-			local a = read()
+			local operandWidth = width
+			local reg, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+			local a = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 			local rv = CPU.getReg(c, reg, width)
 			if form >= 2 then
 				a, rv = rv, a
@@ -277,35 +333,37 @@ function I.step(c: any, b: any)
 				if form >= 2 then
 					CPU.setReg(c, reg, width, result)
 				else
-					write(result)
+					writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, result)
 				end
 			end
 		else
-			local val = imm(width)
+			local val = imm(c, b, width)
 			local result = CPU.alu(c, operation, CPU.getReg(c, 0, width), val, width)
 			if operation ~= "cmp" then
 				CPU.setReg(c, 0, width, result)
 			end
 		end
 	elseif op == 0x0f then
-		local ext = fetch()
+		local ext = fetch(c, b)
 		if ext >= 0x80 and ext <= 0x8f then
-			local d = signed(imm(ow), ow)
-			if cond(ext % 16) then
+			local d = signed(imm(c, b, ow), ow)
+			if cond(c, ext % 16) then
 				c.ip = (c.ip + d) % 2 ^ ow
 			end
 		elseif ext == 0xb6 or ext == 0xb7 or ext == 0xbe or ext == 0xbf then
 			local sw = if ext % 2 == 0 then 8 else 16
-			local r, read = modrm(sw)
-			local v = read()
+			local operandWidth = sw
+			local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+			local v = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 			if ext >= 0xbe then
 				v = signed(v, sw)
 			end
 			CPU.setReg(c, r, ow, v)
 		elseif ext == 0xaf then
-			local r, read = modrm(ow)
+			local operandWidth = ow
+			local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
 			local a = signed(CPU.getReg(c, r, ow), ow)
-			local v = signed(read(), ow)
+			local v = signed(readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod), ow)
 			local product = a * v
 			local low = product
 			if ow == 32 then
@@ -324,49 +382,21 @@ function I.step(c: any, b: any)
 				c.flags = bit32.bor(c.flags, 2049)
 			end
 		else
-			fail()
+			fail(op, startCS, start)
 		end
 	elseif op >= 0xd8 and op <= 0xdf then
-		local spec = b:read8(phys(c.cs, c.ip))
+		local spec = b:read8(phys(c, c.cs, c.ip))
 		local mode = math.floor(spec / 64)
 		local sub = math.floor(spec / 8) % 8
 		local index = spec % 8
-		local function get(i: number): number
-			local v = c.fpu[(c.fpuTop + i) % 8 + 1]
-			if v == nil then
-				error("x87 stack underflow", 0)
-			end
-			return v
-		end
-		local function put(i: number, v: number)
-			c.fpu[(c.fpuTop + i) % 8 + 1] = v
-		end
-		local function fpPush(v: number)
-			c.fpuTop = (c.fpuTop - 1) % 8
-			put(0, v)
-		end
-		local function fpPop()
-			local v = get(0)
-			c.fpu[c.fpuTop + 1] = nil
-			c.fpuTop = (c.fpuTop + 1) % 8
-			return v
-		end
-		local function compare(a: number, v: number)
-			c.fpuStatus = bit32.band(c.fpuStatus or 0, bit32.bnot(0x4500))
-			if a ~= a or v ~= v then
-				c.fpuStatus = bit32.bor(c.fpuStatus, 0x4500)
-			elseif a < v then
-				c.fpuStatus = bit32.bor(c.fpuStatus, 0x100)
-			elseif a == v then
-				c.fpuStatus = bit32.bor(c.fpuStatus, 0x4000)
-			end
-		end
+
 		if mode ~= 3 then
 			local width = if op == 0xdd or op == 0xdc then 64 else 32
-			local r, _, _, address = modrm(width)
+			local operandWidth = width
+			local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
 			if op == 0xd9 and (r == 5 or r == 7) then
-				local a = phys(address.segment, address.offset)
-				local a2 = phys(address.segment, (address.offset + 1) % address.mod)
+				local a = phys(c, operandSeg, operandOff)
+				local a2 = phys(c, operandSeg, (operandOff + 1) % operandMod)
 				if r == 5 then
 					c.fpuControl = b:read8(a) + 256 * b:read8(a2)
 				else
@@ -378,176 +408,183 @@ function I.step(c: any, b: any)
 				return c.currentBlockKey, 1
 			elseif op == 0xdd and r == 7 then
 				local v = bit32.bor(bit32.band(c.fpuStatus or 0, bit32.bnot(0x3800)), bit32.lshift(c.fpuTop, 11))
-				b:write8(phys(address.segment, address.offset), v % 256)
-				b:write8(phys(address.segment, (address.offset + 1) % address.mod), math.floor(v / 256))
+				b:write8(phys(c, operandSeg, operandOff), v % 256)
+				b:write8(phys(c, operandSeg, (operandOff + 1) % operandMod), math.floor(v / 256))
 				c.currentBlockKey = CPU.key(c)
 				return c.currentBlockKey, 1
 			end
-			local tmp = buffer.create(width / 8)
+			local tmp = c.fpuScratch
+			if not tmp then
+				tmp = buffer.create(8)
+				c.fpuScratch = tmp
+			end
 			for i = 0, width / 8 - 1 do
-				buffer.writeu8(tmp, i, b:read8(phys(address.segment, (address.offset + i) % address.mod)))
+				buffer.writeu8(tmp, i, b:read8(phys(c, operandSeg, (operandOff + i) % operandMod)))
 			end
 			local v = if width == 32 then buffer.readf32(tmp, 0) else buffer.readf64(tmp, 0)
 			if (op == 0xd9 or op == 0xdd) and r == 0 then
-				fpPush(v)
+				fpPush(c, v)
 			elseif (op == 0xd9 or op == 0xdd) and (r == 2 or r == 3) then
 				if width == 32 then
-					buffer.writef32(tmp, 0, get(0))
+					buffer.writef32(tmp, 0, fpGet(c, 0))
 				else
-					buffer.writef64(tmp, 0, get(0))
+					buffer.writef64(tmp, 0, fpGet(c, 0))
 				end
 				for i = 0, width / 8 - 1 do
-					b:write8(phys(address.segment, (address.offset + i) % address.mod), buffer.readu8(tmp, i))
+					b:write8(phys(c, operandSeg, (operandOff + i) % operandMod), buffer.readu8(tmp, i))
 				end
 				if r == 3 then
-					fpPop()
+					fpPop(c)
 				end
 			elseif op == 0xd8 or op == 0xdc then
-				local a = get(0)
+				local a = fpGet(c, 0)
 				if r == 0 then
-					put(0, a + v)
+					fpPut(c, 0, a + v)
 				elseif r == 1 then
-					put(0, a * v)
+					fpPut(c, 0, a * v)
 				elseif r == 2 or r == 3 then
-					compare(a, v)
+					fpCompare(c, a, v)
 					if r == 3 then
-						fpPop()
+						fpPop(c)
 					end
 				elseif r == 4 then
-					put(0, a - v)
+					fpPut(c, 0, a - v)
 				elseif r == 5 then
-					put(0, v - a)
+					fpPut(c, 0, v - a)
 				elseif r == 6 then
-					put(0, a / v)
+					fpPut(c, 0, a / v)
 				else
-					put(0, v / a)
+					fpPut(c, 0, v / a)
 				end
 			else
-				fail()
+				fail(op, startCS, start)
 			end
 		else
-			fetch()
+			fetch(c, b)
 			if op == 0xd9 and spec >= 0xc0 and spec <= 0xc7 then
-				fpPush(get(index))
+				fpPush(c, fpGet(c, index))
 			elseif op == 0xd9 and spec >= 0xc8 and spec <= 0xcf then
-				local a = get(0)
-				put(0, get(index))
-				put(index, a)
+				local a = fpGet(c, 0)
+				fpPut(c, 0, fpGet(c, index))
+				fpPut(c, index, a)
 			elseif op == 0xd9 and spec == 0xe8 then
-				fpPush(1)
+				fpPush(c, 1)
 			elseif op == 0xd9 and spec == 0xe9 then
-				fpPush(math.log(10) / math.log(2))
+				fpPush(c, math.log(10) / math.log(2))
 			elseif op == 0xd9 and spec == 0xea then
-				fpPush(1 / math.log(2))
+				fpPush(c, 1 / math.log(2))
 			elseif op == 0xd9 and spec == 0xec then
-				fpPush(math.log(2) / math.log(10))
+				fpPush(c, math.log(2) / math.log(10))
 			elseif op == 0xd9 and spec == 0xed then
-				fpPush(math.log(2))
+				fpPush(c, math.log(2))
 			elseif op == 0xd9 and spec == 0xee then
-				fpPush(0)
+				fpPush(c, 0)
 			elseif op == 0xd9 and spec == 0xeb then
-				fpPush(math.pi)
+				fpPush(c, math.pi)
 			elseif op == 0xd9 and spec == 0xe0 then
-				put(0, -get(0))
+				fpPut(c, 0, -fpGet(c, 0))
 			elseif op == 0xd9 and spec == 0xe1 then
-				put(0, math.abs(get(0)))
+				fpPut(c, 0, math.abs(fpGet(c, 0)))
 			elseif op == 0xd9 and spec == 0xfa then
-				put(0, math.sqrt(get(0)))
+				fpPut(c, 0, math.sqrt(fpGet(c, 0)))
 			elseif op == 0xd9 and spec == 0xfe then
-				put(0, math.sin(get(0)))
+				fpPut(c, 0, math.sin(fpGet(c, 0)))
 			elseif op == 0xd9 and spec == 0xff then
-				put(0, math.cos(get(0)))
+				fpPut(c, 0, math.cos(fpGet(c, 0)))
 			elseif op == 0xdb and spec == 0xe3 then
-				c.fpu = {}
+				table.clear(c.fpu)
 				c.fpuTop = 0
 				c.fpuStatus = 0
 				c.fpuControl = 0x37f
 			elseif op == 0xdf and spec == 0xe0 then
 				CPU.setReg(c, 0, 16, bit32.bor(c.fpuStatus or 0, bit32.lshift(c.fpuTop, 11)))
 			elseif op == 0xd8 then
-				local a = get(0)
-				local v = get(index)
+				local a = fpGet(c, 0)
+				local v = fpGet(c, index)
 				if sub == 0 then
-					put(0, a + v)
+					fpPut(c, 0, a + v)
 				elseif sub == 1 then
-					put(0, a * v)
+					fpPut(c, 0, a * v)
 				elseif sub == 2 or sub == 3 then
-					compare(a, v)
+					fpCompare(c, a, v)
 					if sub == 3 then
-						fpPop()
+						fpPop(c)
 					end
 				elseif sub == 4 then
-					put(0, a - v)
+					fpPut(c, 0, a - v)
 				elseif sub == 5 then
-					put(0, v - a)
+					fpPut(c, 0, v - a)
 				elseif sub == 6 then
-					put(0, a / v)
+					fpPut(c, 0, a / v)
 				else
-					put(0, v / a)
+					fpPut(c, 0, v / a)
 				end
 			elseif op == 0xde and spec == 0xd9 then
-				compare(get(0), get(1))
-				fpPop()
-				fpPop()
+				fpCompare(c, fpGet(c, 0), fpGet(c, 1))
+				fpPop(c)
+				fpPop(c)
 			elseif (op == 0xdc or op == 0xde) and (sub == 0 or sub == 1 or sub >= 4) then
-				local a = get(index)
-				local v = get(0)
+				local a = fpGet(c, index)
+				local v = fpGet(c, 0)
 				if sub == 0 then
-					put(index, a + v)
+					fpPut(c, index, a + v)
 				elseif sub == 1 then
-					put(index, a * v)
+					fpPut(c, index, a * v)
 				elseif sub == 4 then
-					put(index, v - a)
+					fpPut(c, index, v - a)
 				elseif sub == 5 then
-					put(index, a - v)
+					fpPut(c, index, a - v)
 				elseif sub == 6 then
-					put(index, v / a)
+					fpPut(c, index, v / a)
 				else
-					put(index, a / v)
+					fpPut(c, index, a / v)
 				end
 				if op == 0xde then
-					fpPop()
+					fpPop(c)
 				end
 			elseif op == 0xdd and sub == 0 then
 				c.fpu[(c.fpuTop + index) % 8 + 1] = nil
 			elseif op == 0xdd and (sub == 4 or sub == 5) then
-				compare(get(0), get(index))
+				fpCompare(c, fpGet(c, 0), fpGet(c, index))
 				if sub == 5 then
-					fpPop()
+					fpPop(c)
 				end
 			elseif op == 0xdd and (sub == 2 or sub == 3) then
-				put(index, get(0))
+				fpPut(c, index, fpGet(c, 0))
 				if sub == 3 then
-					fpPop()
+					fpPop(c)
 				end
 			else
-				fail()
+				fail(op, startCS, start)
 			end
 		end
 	elseif op == 0xd7 then
 		local aw = if addr32 then 32 else 16
 		local off = (CPU.getReg(c, 3, aw) + CPU.getReg(c, 0, 8)) % 2 ^ aw
-		CPU.setReg(c, 0, 8, b:read8(phys(seg or c.ds, off)))
+		CPU.setReg(c, 0, 8, b:read8(phys(c, seg or c.ds, off)))
 	elseif op == 0x8f then
-		local r, _, write = modrm(ow)
+		local operandWidth = ow
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
 		if r ~= 0 then
-			fail()
+			fail(op, startCS, start)
 		end
-		write(pop(c, b, ow))
+		writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, pop(c, b, ow))
 	elseif op == 0x8d or op == 0xc4 or op == 0xc5 then
-		local r, _, _, a = modrm(ow)
-		if not a then
-			fail()
+		local operandWidth = ow
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		if operandReg ~= nil then
+			fail(op, startCS, start)
 		end
 		if op == 0x8d then
-			CPU.setReg(c, r, ow, a.offset)
+			CPU.setReg(c, r, ow, operandOff)
 		else
 			local v = 0
 			for i = 0, ow / 8 - 1 do
-				v += b:read8(phys(a.segment, (a.offset + i) % a.mod)) * 2 ^ (8 * i)
+				v += b:read8(phys(c, operandSeg, (operandOff + i) % operandMod)) * 2 ^ (8 * i)
 			end
-			local off = (a.offset + ow / 8) % a.mod
-			local selector = b:read8(phys(a.segment, off)) + b:read8(phys(a.segment, (off + 1) % a.mod)) * 256
+			local off = (operandOff + ow / 8) % operandMod
+			local selector = b:read8(phys(c, operandSeg, off))
+				+ b:read8(phys(c, operandSeg, (off + 1) % operandMod)) * 256
 			CPU.setReg(c, r, ow, v)
 			if op == 0xc4 then
 				c.es = selector
@@ -557,26 +594,26 @@ function I.step(c: any, b: any)
 		end
 	elseif op == 0x60 then
 		local original = CPU.getReg(c, 4, ow)
-		for _, r in ipairs({ 0, 1, 2, 3, 4, 5, 6, 7 }) do
+		for r = 0, 7 do
 			push(c, b, if r == 4 then original else CPU.getReg(c, r, ow), ow)
 		end
 	elseif op == 0x61 then
-		for _, r in ipairs({ 7, 6, 5, 4, 3, 2, 1, 0 }) do
+		for r = 7, 0, -1 do
 			local v = pop(c, b, ow)
 			if r ~= 4 then
 				CPU.setReg(c, r, ow, v)
 			end
 		end
 	elseif op == 0xc8 then
-		local size = word()
-		local level = fetch() % 32
+		local size = word(c, b)
+		local level = fetch(c, b) % 32
 		push(c, b, CPU.getReg(c, 5, ow), ow)
 		local sw = if c.mode32 then 32 else 16
 		local frame = CPU.getReg(c, 4, sw)
 		local bp = CPU.getReg(c, 5, ow)
 		for _ = 1, level - 1 do
 			bp = (bp - ow / 8) % 2 ^ ow
-			local a = phys(c.ss, bp)
+			local a = phys(c, c.ss, bp)
 			push(
 				c,
 				b,
@@ -616,13 +653,13 @@ function I.step(c: any, b: any)
 	elseif op >= 0x58 and op <= 0x5f then
 		CPU.setReg(c, op % 8, ow, pop(c, b, ow))
 	elseif op >= 0x70 and op <= 0x7f then
-		local d = signed(fetch(), 8)
-		if cond(op % 16) then
+		local d = signed(fetch(c, b), 8)
+		if cond(c, op % 16) then
 			c.ip = (c.ip + d) % ipmod
 		end
 	elseif op >= 0xb0 and op <= 0xbf then
 		local w = if op < 0xb8 then 8 elseif w32 then 32 else 16
-		CPU.setReg(c, op % 8, w, imm(w))
+		CPU.setReg(c, op % 8, w, imm(c, b, w))
 	elseif op == 0x90 then
 	elseif op >= 0x91 and op <= 0x97 then
 		local x = CPU.getReg(c, 0, ow)
@@ -639,48 +676,64 @@ function I.step(c: any, b: any)
 		or op == 0x85
 	then
 		local w = if op % 2 == 0 then 8 elseif w32 then 32 else 16
-		local r, read, write = modrm(w)
-		local a = read()
+		local operandWidth = w
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		local a = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 		local v = CPU.getReg(c, r, w)
 		if op == 0x88 or op == 0x89 then
-			write(v)
+			writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, v)
 		elseif op == 0x8a or op == 0x8b then
 			CPU.setReg(c, r, w, a)
 		elseif op == 0x84 or op == 0x85 then
 			CPU.alu(c, "test", a, v, w)
 		else
-			write(v)
+			writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, v)
 			CPU.setReg(c, r, w, a)
 		end
 	elseif op == 0x80 or op == 0x81 or op == 0x83 then
 		local w = if op == 0x80 then 8 elseif w32 then 32 else 16
-		local r, read, write = modrm(w)
-		local v = if op == 0x81 then imm(w) elseif op == 0x83 then signed(fetch(), 8) else fetch()
-		local result = CPU.alu(c, ops[r + 1], read(), v, w)
+		local operandWidth = w
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		local v = if op == 0x81 then imm(c, b, w) elseif op == 0x83 then signed(fetch(c, b), 8) else fetch(c, b)
+		local result = CPU.alu(
+			c,
+			OPS[r + 1],
+			readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod),
+			v,
+			w
+		)
 		if r ~= 7 then
-			write(result)
+			writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, result)
 		end
 	elseif op == 0xc6 or op == 0xc7 then
 		local w = if op == 0xc6 then 8 elseif w32 then 32 else 16
-		local r, _, write = modrm(w)
+		local operandWidth = w
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
 		if r ~= 0 then
-			fail()
+			fail(op, startCS, start)
 		end
-		write(imm(w))
+		writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, imm(c, b, w))
 	elseif op == 0x8c or op == 0x8e then
-		local r, read, write = modrm(16)
-		local names = { "es", "cs", "ss", "ds", "fs", "gs" }
-		local name = names[r + 1]
+		local operandWidth = 16
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		local name = if r == 0
+			then "es"
+			elseif r == 1 then "cs"
+			elseif r == 2 then "ss"
+			elseif r == 3 then "ds"
+			elseif r == 4 then "fs"
+			elseif r == 5 then "gs"
+			else nil
 		if not name or (op == 0x8e and r == 1) then
-			fail()
+			fail(op, startCS, start)
 		end
 		if op == 0x8c then
-			write(c[name])
+			writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, c[name])
 		else
-			c[name] = read()
+			c[name] = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 		end
 	elseif op == 0xa0 or op == 0xa1 or op == 0xa2 or op == 0xa3 then
-		local off = word()
+		local off = word(c, b)
 		local s = seg or c.ds
 		local w = if op % 2 == 0 then 8 else 16
 		if op < 0xa2 then
@@ -699,57 +752,125 @@ function I.step(c: any, b: any)
 			local si = CPU.getReg(c, 6, aw)
 			local di = CPU.getReg(c, 7, aw)
 			local src = seg or c.ds
-			local function rd(s: any, o: any)
-				local v = 0
-				for i = 0, size - 1 do
-					v += b:read8(phys(s, (o + i) % 2 ^ aw)) * 2 ^ (8 * i)
-				end
-				return v
-			end
-			local function wr(s: any, o: any, v: any)
-				for i = 0, size - 1 do
-					b:write8(phys(s, (o + i) % 2 ^ aw), math.floor(v / 2 ^ (8 * i)) % 256)
-				end
-			end
-			if op == 0xa4 or op == 0xa5 then
-				wr(c.es, di, rd(src, si))
-			elseif op == 0xa6 or op == 0xa7 then
-				CPU.alu(c, "cmp", rd(src, si), rd(c.es, di), width)
-			elseif op == 0xaa or op == 0xab then
-				wr(c.es, di, CPU.getReg(c, 0, width))
-			elseif op == 0xac or op == 0xad then
-				CPU.setReg(c, 0, width, rd(src, si))
-			else
-				CPU.alu(c, "cmp", CPU.getReg(c, 0, width), rd(c.es, di), width)
-			end
+
 			local delta = if bit32.band(c.flags, 1024) ~= 0 then -size else size
+			local repeatable = rep ~= 0 and b.fastRepEnabled == true
+			local count = 0
+			local compare = op == 0xa6 or op == 0xa7 or op == 0xae or op == 0xaf
+			while true do
+				-- Fast stores only when the entire chunk is a contiguous, unhooked,
+				-- writable RAM span. All other cases retain ordered bus accesses.
+				if repeatable and (op == 0xaa or op == 0xab) and delta > 0 then
+					local n = math.min(cx, 512)
+					local bytes = n * size
+					local address = phys(c, c.es, di)
+					local video = b.video
+					local hookSafe = b.memoryWriteHook == nil
+						or (video and video.directMemorySafe and b.memoryWriteHook == b.videoMemoryWriteHook)
+					local planar = video and video.mode == 0x13 and bit32.band(video.seq[4] or 0, 8) == 0
+					local crossesPlanar = planar and address < 0xb0000 and address + bytes > 0xa0000
+					if
+						hookSafe
+						and not crossesPlanar
+						and di + bytes <= 2 ^ aw
+						and address + bytes <= buffer.len(b.ram)
+						and (c.mode32 or address + bytes <= 0x100000)
+						and (address >= 0x100000 or address + bytes <= 0xf0000)
+					then
+						local value = CPU.getReg(c, 0, width)
+						if size == 1 then
+							buffer.fill(b.ram, address, value, bytes)
+						elseif size == 2 then
+							for offset = 0, bytes - 1, 2 do
+								buffer.writeu16(b.ram, address + offset, value)
+							end
+						else
+							for offset = 0, bytes - 1, 4 do
+								buffer.writeu32(b.ram, address + offset, value)
+							end
+						end
+						for page = math.floor(address / 4096), math.floor((address + bytes - 1) / 4096) do
+							if b.codePageBitmap[page] then
+								b.invalidatedPages[page] = true
+							end
+						end
+						if video and address < 0xc0000 and address + bytes > 0xa0000 then
+							video.vramDirty = true
+						end
+						di = (di + bytes) % 2 ^ aw
+						cx -= n
+						count += n
+						if cx == 0 then
+							break
+						end
+						if b.executionDeadline and os.clock() >= b.executionDeadline then
+							c.ip = start
+							break
+						end
+						continue
+					end
+				end
+				if op == 0xa4 or op == 0xa5 then
+					writeOperand(c, b, width, nil, c.es, di, 2 ^ aw, readOperand(c, b, width, nil, src, si, 2 ^ aw))
+				elseif op == 0xa6 or op == 0xa7 then
+					CPU.alu(
+						c,
+						"cmp",
+						readOperand(c, b, width, nil, src, si, 2 ^ aw),
+						readOperand(c, b, width, nil, c.es, di, 2 ^ aw),
+						width
+					)
+				elseif op == 0xaa or op == 0xab then
+					writeOperand(c, b, width, nil, c.es, di, 2 ^ aw, CPU.getReg(c, 0, width))
+				elseif op == 0xac or op == 0xad then
+					CPU.setReg(c, 0, width, readOperand(c, b, width, nil, src, si, 2 ^ aw))
+				else
+					CPU.alu(c, "cmp", CPU.getReg(c, 0, width), readOperand(c, b, width, nil, c.es, di, 2 ^ aw), width)
+				end
+				if op <= 0xa7 or op == 0xac or op == 0xad then
+					si = (si + delta) % 2 ^ aw
+				end
+				if op <= 0xab or op == 0xae or op == 0xaf then
+					di = (di + delta) % 2 ^ aw
+				end
+				if rep == 0 then
+					break
+				end
+				cx -= 1
+				count += 1
+				local z = bit32.band(c.flags, 64) ~= 0
+				if cx == 0 or (compare and ((rep == 0xf3 and not z) or (rep == 0xf2 and z))) then
+					break
+				end
+				if
+					not repeatable or (count % 512 == 0 and b.executionDeadline and os.clock() >= b.executionDeadline)
+				then
+					c.ip = start
+					break
+				end
+			end
 			if op <= 0xa7 or op == 0xac or op == 0xad then
-				CPU.setReg(c, 6, aw, si + delta)
+				CPU.setReg(c, 6, aw, si)
 			end
 			if op <= 0xab or op == 0xae or op == 0xaf then
-				CPU.setReg(c, 7, aw, di + delta)
+				CPU.setReg(c, 7, aw, di)
 			end
 			if rep ~= 0 then
-				cx = (cx - 1) % 2 ^ aw
 				CPU.setReg(c, 1, aw, cx)
-				local compare = op == 0xa6 or op == 0xa7 or op == 0xae or op == 0xaf
-				local z = bit32.band(c.flags, 64) ~= 0
-				if cx ~= 0 and (not compare or (rep == 0xf3 and z) or (rep == 0xf2 and not z)) then
-					c.ip = start
-				end
 			end
 		end
 	elseif op == 0xa8 or op == 0xa9 then
 		local width = if op == 0xa8 then 8 else ow
-		CPU.alu(c, "test", CPU.getReg(c, 0, width), imm(width), width)
+		CPU.alu(c, "test", CPU.getReg(c, 0, width), imm(c, b, width), width)
 	elseif op == 0xd0 or op == 0xd1 or op == 0xd2 or op == 0xd3 or op == 0xc0 or op == 0xc1 then
 		local width = if op % 2 == 0 then 8 else ow
-		local r, read, write = modrm(width)
+		local operandWidth = width
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
 		local count = if op == 0xd0 or op == 0xd1
 			then 1
 			elseif op == 0xd2 or op == 0xd3 then CPU.getReg(c, 1, 8) % 32
-			else fetch() % 32
-		local value = read()
+			else fetch(c, b) % 32
+		local value = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 		local initial = value
 		local mod = 2 ^ width
 		local sign = mod / 2
@@ -783,7 +904,7 @@ function I.step(c: any, b: any)
 			end
 		end
 		if count > 0 then
-			write(value)
+			writeOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod, value)
 			c.flags = bit32.band(c.flags, bit32.bnot(1))
 			if cf then
 				c.flags = bit32.bor(c.flags, 1)
@@ -810,15 +931,34 @@ function I.step(c: any, b: any)
 		end
 	elseif op == 0xf6 or op == 0xf7 then
 		local width = if op == 0xf6 then 8 else ow
-		local r, read, write = modrm(width)
-		local v = read()
+		local operandWidth = width
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		local v = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 		local mod = 2 ^ width
 		if r == 0 then
-			CPU.alu(c, "test", v, imm(width), width)
+			CPU.alu(c, "test", v, imm(c, b, width), width)
 		elseif r == 2 then
-			write(bit32.band(bit32.bnot(v), mod - 1))
+			writeOperand(
+				c,
+				b,
+				operandWidth,
+				operandReg,
+				operandSeg,
+				operandOff,
+				operandMod,
+				bit32.band(bit32.bnot(v), mod - 1)
+			)
 		elseif r == 3 then
-			write(CPU.alu(c, "sub", 0, v, width))
+			writeOperand(
+				c,
+				b,
+				operandWidth,
+				operandReg,
+				operandSeg,
+				operandOff,
+				operandMod,
+				CPU.alu(c, "sub", 0, v, width)
+			)
 		elseif r == 4 or r == 5 then
 			local a = CPU.getReg(c, 0, width)
 			local aa = if r == 5 then signed(a, width) else a
@@ -906,24 +1046,34 @@ function I.step(c: any, b: any)
 				CPU.setReg(c, 2, width, rem)
 			end
 		else
-			fail()
+			fail(op, startCS, start)
 		end
 	elseif op == 0xfe or op == 0xff then
 		local width = if op == 0xfe then 8 else ow
-		local r, read, write, address = modrm(width)
-		local v = read()
+		local operandWidth = width
+		local r, operandReg, operandSeg, operandOff, operandMod = modrm(c, b, seg, addr32, operandWidth)
+		local v = readOperand(c, b, operandWidth, operandReg, operandSeg, operandOff, operandMod)
 		if r == 0 or r == 1 then
-			write(CPU.alu(c, if r == 0 then "inc" else "dec", v, 1, width))
+			writeOperand(
+				c,
+				b,
+				operandWidth,
+				operandReg,
+				operandSeg,
+				operandOff,
+				operandMod,
+				CPU.alu(c, if r == 0 then "inc" else "dec", v, 1, width)
+			)
 		elseif op == 0xff and r == 2 then
 			push(c, b, c.ip, ow)
 			c.ip = v
 		elseif op == 0xff and (r == 3 or r == 5) then
-			if not address then
-				fail()
+			if operandReg ~= nil then
+				fail(op, startCS, start)
 			end
-			local off = (address.offset + width / 8) % address.mod
-			local selector = b:read8(phys(address.segment, off))
-				+ 256 * b:read8(phys(address.segment, (off + 1) % address.mod))
+			local off = (operandOff + width / 8) % operandMod
+			local selector = b:read8(phys(c, operandSeg, off))
+				+ 256 * b:read8(phys(c, operandSeg, (off + 1) % operandMod))
 			if r == 3 then
 				push(c, b, c.cs, ow)
 				push(c, b, c.ip, ow)
@@ -935,21 +1085,21 @@ function I.step(c: any, b: any)
 		elseif op == 0xff and r == 6 then
 			push(c, b, v, ow)
 		else
-			fail()
+			fail(op, startCS, start)
 		end
 	elseif op == 0xe8 then
-		local d = signed(imm(ow), ow)
+		local d = signed(imm(c, b, ow), ow)
 		push(c, b, c.ip, ow)
 		c.ip = (c.ip + d) % 2 ^ ow
 	elseif op == 0xe9 then
-		local d = signed(imm(ow), ow)
+		local d = signed(imm(c, b, ow), ow)
 		c.ip = (c.ip + d) % 2 ^ ow
 	elseif op == 0xeb then
-		local d = signed(fetch(), 8)
+		local d = signed(fetch(c, b), 8)
 		c.ip = (c.ip + d) % ipmod
 	elseif op == 0xea or op == 0x9a then
-		local off = word()
-		local s = word()
+		local off = word(c, b)
+		local s = word(c, b)
 		if op == 0x9a then
 			push(c, b, c.cs)
 			push(c, b, c.ip)
@@ -957,17 +1107,17 @@ function I.step(c: any, b: any)
 		c.cs = s
 		c.ip = off
 	elseif op == 0xc3 or op == 0xc2 then
-		local n = if op == 0xc2 then word() else 0
+		local n = if op == 0xc2 then word(c, b) else 0
 		c.ip = pop(c, b, ow)
 		local sw = if c.mode32 then 32 else 16
 		CPU.setReg(c, 4, sw, CPU.getReg(c, 4, sw) + n)
 	elseif op == 0xcb or op == 0xca then
-		local n = if op == 0xca then word() else 0
+		local n = if op == 0xca then word(c, b) else 0
 		c.ip = pop(c, b)
 		c.cs = pop(c, b)
 		CPU.setReg(c, 4, 16, CPU.getReg(c, 4, 16) + n)
 	elseif op == 0xcd then
-		I.interrupt(c, b, fetch())
+		I.interrupt(c, b, fetch(c, b))
 	elseif op == 0xcc then
 		I.interrupt(c, b, 3)
 	elseif op == 0xce then
@@ -984,9 +1134,9 @@ function I.step(c: any, b: any)
 	elseif op == 0x9d then
 		c.flags = bit32.bor(pop(c, b, ow), 2)
 	elseif op == 0x06 or op == 0x0e or op == 0x16 or op == 0x1e then
-		push(c, b, ({ c.es, c.cs, c.ss, c.ds })[math.floor(op / 8) + 1])
+		push(c, b, (if op == 0x06 then c.es elseif op == 0x0e then c.cs elseif op == 0x16 then c.ss else c.ds))
 	elseif op == 0x07 or op == 0x17 or op == 0x1f then
-		local n = ({ [0x07] = "es", [0x17] = "ss", [0x1f] = "ds" })[op]
+		local n = (if op == 0x07 then "es" elseif op == 0x17 then "ss" else "ds")
 		c[n] = pop(c, b)
 	elseif op == 0xf4 then
 		c.halted = true
@@ -1005,7 +1155,7 @@ function I.step(c: any, b: any)
 	elseif op == 0xf5 then
 		c.flags = bit32.bxor(c.flags, 1)
 	elseif op == 0xe0 or op == 0xe1 or op == 0xe2 or op == 0xe3 then
-		local d = signed(fetch(), 8)
+		local d = signed(fetch(c, b), 8)
 		local cx = CPU.getReg(c, 1, 16)
 		if op ~= 0xe3 then
 			cx = (cx - 1) % 65536
@@ -1019,9 +1169,9 @@ function I.step(c: any, b: any)
 			c.ip = (c.ip + d) % 65536
 		end
 	elseif op == 0x68 or op == 0x6a then
-		push(c, b, if op == 0x68 then imm(ow) else signed(fetch(), 8), ow)
+		push(c, b, if op == 0x68 then imm(c, b, ow) else signed(fetch(c, b), 8), ow)
 	elseif op == 0xe4 or op == 0xe5 or op == 0xec or op == 0xed then
-		local port = if op < 0xec then fetch() else CPU.getReg(c, 2, 16)
+		local port = if op < 0xec then fetch(c, b) else CPU.getReg(c, 2, 16)
 		local w = if op % 2 == 0 then 8 else 16
 		local v = b:in8(port)
 		if w == 16 then
@@ -1029,7 +1179,7 @@ function I.step(c: any, b: any)
 		end
 		CPU.setReg(c, 0, w, v)
 	elseif op == 0xe6 or op == 0xe7 or op == 0xee or op == 0xef then
-		local port = if op < 0xee then fetch() else CPU.getReg(c, 2, 16)
+		local port = if op < 0xee then fetch(c, b) else CPU.getReg(c, 2, 16)
 		local w = if op % 2 == 0 then 8 else 16
 		local v = CPU.getReg(c, 0, w)
 		b:out8(port, v)
@@ -1037,7 +1187,7 @@ function I.step(c: any, b: any)
 			b:out8((port + 1) % 65536, math.floor(v / 256))
 		end
 	else
-		fail()
+		fail(op, startCS, start)
 	end
 	c.currentBlockKey = CPU.key(c)
 	return c.currentBlockKey, 1

@@ -1,10 +1,10 @@
 --!strict
 return {
 	format = "mz", packing = nil, mode32 = false, imageBase = 0,
-	image = "\184\000\000\142\216\184\007\000\005\008\000\163\000\003\244",
 	entryCS = 0, entryIP = 0, initialSS = 0, initialSP = 1024,
 	minExtraParagraphs = 0, maxExtraParagraphs = 0,
-	relocations = {{offset=1,segment=0}},
+	image = "\184\000\000\142\216\184\007\000\005\008\000\163\000\003\244",
+	relocations = {{offset=1,segment=0},},
 	warnings = {},
 	directBlocks = {
 		[5] = true,

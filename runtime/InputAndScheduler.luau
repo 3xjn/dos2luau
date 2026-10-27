@@ -1,5 +1,8 @@
 --!strict
 local Interpreter = require(script.Parent.Interpreter)
+-- IPS estimates share an approximate 4.77 MHz / 364130 IPS ratio; these are
+-- workload pacing presets, not cycle-accurate CPU models.
+local PRESET_IPS = { turbo = 3500000, xt = 364130, ["286"] = 916050, ["386"] = 2519145 }
 local Scheduler = {}
 Scheduler.__index = Scheduler
 local keys: { [string]: { number } } = {
@@ -95,6 +98,8 @@ function Scheduler.new(cpu: any, bus: any, dispatcher: any, options: any): any
 		options = options,
 		audio = options.audio,
 		video = options.video,
+		speedPreset = "turbo",
+		speedExplicit = false,
 		credit = 0,
 		tickCount = 0,
 		executedInstructions = 0,
@@ -109,7 +114,15 @@ function Scheduler.new(cpu: any, bus: any, dispatcher: any, options: any): any
 	bus:registerPortHandler(0x60, function()
 		return table.remove(self.scanQueue, 1) or 0
 	end, nil)
+	if options.speedPreset ~= nil then
+		self:setSpeedPreset(options.speedPreset)
+	end
 	return self
+end
+function Scheduler.setSpeedPreset(self: any, name: string)
+	assert(PRESET_IPS[name] ~= nil, "Unknown speed preset: " .. tostring(name))
+	self.speedPreset = name
+	self.speedExplicit = true
 end
 function Scheduler.keyEvent(self: any, name: string, down: boolean)
 	local k = keys[name]
@@ -164,6 +177,12 @@ function Scheduler.keyEvent(self: any, name: string, down: boolean)
 	if alt then
 		ascii = 0
 	end
+	self:enqueueWord(k[1], ascii, false)
+end
+function Scheduler.enqueueWord(self: any, scan: number, ascii: number, injectScan: boolean?): boolean
+	if injectScan and #self.scanQueue > 254 then
+		return false
+	end
 	local head = self.bus:read16(0x41a)
 	local tail = self.bus:read16(0x41c)
 	if head < 0x1e or head >= 0x3e or tail < 0x1e or tail >= 0x3e then
@@ -177,12 +196,19 @@ function Scheduler.keyEvent(self: any, name: string, down: boolean)
 		nextTail = 0x1e
 	end
 	if nextTail ~= head then
-		self.bus:write16(0x400 + tail, k[1] * 256 + ascii)
+		self.bus:write16(0x400 + tail, scan * 256 + ascii)
 		self.bus:write16(0x41c, nextTail)
 		self.cpu.waitingForKey = false
 		self.cpu.yieldRequested = false
 		self.waitReturn = nil
+		if injectScan and #self.scanQueue <= 254 then
+			table.insert(self.scanQueue, scan)
+			table.insert(self.scanQueue, scan + 128)
+			self.pendingKeyboard += 2
+		end
+		return true
 	end
+	return false
 end
 function Scheduler.releaseAll(self: any)
 	local held = {}
@@ -197,16 +223,38 @@ function Scheduler.step(self: any, dt: number)
 	dt = math.max(0, dt)
 	local c = self.cpu
 	local opts = self.options
-	self.credit =
-		math.min(self.credit + dt * (opts.instructionsPerSecond or 364130), opts.maxInstructionsPerFrame or 100000)
-	if c.waitingForKey then
+	local paced = self.interactive == true
+		and not opts.headless
+		and not opts.deterministic
+		and (opts.turboVideo ~= false or self.speedExplicit)
+		and self.ticks >= 3
+	local turbo = paced and self.speedPreset == "turbo"
+	self.bus.fastRepEnabled = turbo
+	self.bus.clockCheckInterval = if paced then 512 else 1
+	local maxFrame = opts.maxInstructionsPerFrame or (if paced then 250000 else 100000)
+	local speed = if paced and self.speedExplicit
+		then PRESET_IPS[self.speedPreset]
+		else opts.instructionsPerSecond or (if paced then PRESET_IPS[self.speedPreset] else 364130)
+	self.credit = math.min(self.credit + dt * speed, maxFrame)
+	if paced then
+		self.wallTick = (self.wallTick or 0) + dt * 18.2065
+		local elapsed = math.floor(self.wallTick)
+		self.wallTick -= elapsed
+		self.pendingTimer += elapsed
+		self.ticks += elapsed
+	elseif c.waitingForKey then
 		self.waitTick = (self.waitTick or 0) + dt * (364130 / 20000)
 		local ticks = math.floor(self.waitTick)
 		self.waitTick -= ticks
 		self.pendingTimer += ticks
 	end
-	local budget = math.min(math.floor(self.credit), opts.maxInstructionsPerFrame or 100000)
-	local deadline = os.clock() + (opts.frameBudgetSeconds or 0.003)
+	local budget = math.min(math.floor(self.credit), maxFrame)
+	local deadline = os.clock()
+		+ (
+			opts.frameBudgetSeconds
+			or (if self.interactive and not opts.headless and not opts.deterministic then 0.010 else 0.003)
+		)
+	self.bus.executionDeadline = deadline
 	c.yieldRequested = false
 	while budget > 0 and os.clock() < deadline do
 		if bit32.band(c.flags, 0x200) ~= 0 and (not c.halted or c.exitCode == nil) then
@@ -237,7 +285,8 @@ function Scheduler.step(self: any, dt: number)
 		if c.halted or c.waitingForKey or c.yieldRequested then
 			break
 		end
-		local slice = math.min(budget, 20000 - self.tickCount, if self.waitReturn then 1 else budget)
+		local slice =
+			math.min(budget, if paced then budget else 20000 - self.tickCount, if self.waitReturn then 1 else budget)
 		local remain = self.dispatcher:run(c, self.bus, slice, deadline)
 		local used = slice - remain
 		if used <= 0 then
@@ -245,7 +294,9 @@ function Scheduler.step(self: any, dt: number)
 		end
 		budget -= used
 		self.credit -= used
-		self.tickCount += used
+		if not paced then
+			self.tickCount += used
+		end
 		self.executedInstructions += used
 		if
 			self.waitReturn
@@ -256,15 +307,27 @@ function Scheduler.step(self: any, dt: number)
 			c.waitingForKey = true
 			self.waitReturn = nil
 		end
-		if self.tickCount >= 20000 then
+		if not paced and self.tickCount >= 20000 then
 			self.tickCount -= 20000
 			self.pendingTimer += 1
 			self.ticks += 1
+			if
+				self.ticks == 3
+				and self.interactive
+				and not opts.headless
+				and not opts.deterministic
+				and (opts.turboVideo ~= false or self.speedExplicit)
+			then
+				break
+			end
 		end
 	end
 	-- Avoid accumulating unbounded catch-up work while the guest is blocked.
 	if c.waitingForKey or c.halted then
 		self.credit = math.min(self.credit, 1)
+	end
+	if self.inputRouter then
+		self.inputRouter:update(dt)
 	end
 	if self.audio then
 		self.audio:update(dt, c)
@@ -273,20 +336,33 @@ function Scheduler.step(self: any, dt: number)
 		self.video:present()
 	end
 end
+function Scheduler.handleInputBegan(self: any, obj: any, processed: boolean, input: any)
+	local keyboard = obj.UserInputType and obj.UserInputType.Name == "Keyboard"
+	if keyboard then
+		if input:GetFocusedTextBox() == nil then
+			self:keyEvent(obj.KeyCode.Name, true)
+		end
+	elseif not processed then
+		self:keyEvent(obj.KeyCode.Name, true)
+	end
+end
 function Scheduler.start(self: any)
 	if self.running or self.options.headless then
 		return
 	end
 	self.running = true
 	local run = game:GetService("RunService")
+	self.interactive = run:IsRunning() and not self.options.deterministic and not self.options.headless
 	local input = game:GetService("UserInputService")
 	local heartbeat: any = run.Heartbeat:Connect(function(dt: number)
 		self:step(dt)
 	end)
+	if self.options.externalInput then
+		table.insert(self.connections, heartbeat)
+		return
+	end
 	local began: any = input.InputBegan:Connect(function(obj: any, processed: boolean)
-		if not processed then
-			self:keyEvent(obj.KeyCode.Name, true)
-		end
+		self:handleInputBegan(obj, processed, input)
 	end)
 	local ended: any = input.InputEnded:Connect(function(obj: any)
 		self:keyEvent(obj.KeyCode.Name, false)
@@ -300,7 +376,12 @@ function Scheduler.start(self: any)
 	table.insert(self.connections, focus)
 end
 function Scheduler.stop(self: any)
+	if self.inputRouter then
+		self.inputRouter:releaseAll()
+	end
 	self.running = false
+	self.interactive = false
+	self.bus.fastRepEnabled = false
 	for _, connection in ipairs(self.connections) do
 		connection:Disconnect()
 	end

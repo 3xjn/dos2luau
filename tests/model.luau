@@ -16,6 +16,10 @@ if string.find(path, "oregon", 1, true) then
 	assert(runtime:FindFirstChild("OutOregon"), "game module folder")
 	assert(string.find(client.Source, "OutOregon.Program_Meta", 1, true), "game metadata binding")
 	assert(not string.find(client.Source, "DOS2LUAU_PROGRAM_OPTIONS", 1, true), "program insertion applied")
+	for _, flag in ipairs({ "smartMenuClick", "tapToContinue", "gamepadMenuHighlight", "touchQuickBar" }) do
+		assert(string.find(client.Source, flag .. " = true", 1, true), "Oregon assist flag " .. flag)
+	end
+	assert(not string.find(client.Source, "DOS2LUAU_INPUT_OPTIONS", 1, true), "input insertion applied")
 end
 fs.writeDir(".test-runtime")
 fs.writeFile(".test-runtime/PackagedClient.luau", client.Source)

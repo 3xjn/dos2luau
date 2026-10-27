@@ -1,9 +1,9 @@
 --!strict
 return {
 	format = "com", packing = nil, mode32 = false, imageBase = 0,
-	image = "\184\255\127\005\001\000\187\255\255\067\061\000\128\117\003\053\085\170\163\000\003\185\005\000\073\117\253\244",
 	entryCS = 0, entryIP = 256, initialSS = 0, initialSP = 65534,
 	minExtraParagraphs = 0, maxExtraParagraphs = 0,
+	image = "\184\255\127\005\001\000\187\255\255\067\061\000\128\117\003\053\085\170\163\000\003\185\005\000\073\117\253\244",
 	relocations = {},
 	warnings = {},
 	directBlocks = {

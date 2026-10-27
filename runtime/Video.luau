@@ -1,6 +1,7 @@
 --!strict
 --!native
 local font = require(script.Parent.CP437Font)
+local TextRegions = require(script.Parent.TextRegions)
 local Video = {}
 Video.__index = Video
 -- Standard VGA DAC values from https://github.com/rust-osdev/vga/blob/master/src/colors.rs
@@ -802,6 +803,7 @@ function Video.new(bus: any, options: any?): any
 		paletteRGBA = buffer.create(1024),
 		palette = {},
 		vramDirty = true,
+		frameGeneration = 0,
 		paletteDirty = true,
 		planes = { buffer.create(65536), buffer.create(65536), buffer.create(65536), buffer.create(65536) },
 		seqIndex = 0,
@@ -820,6 +822,12 @@ function Video.new(bus: any, options: any?): any
 		blinkClock = options.clock or os.clock,
 		lastBlink = -1,
 		imageLabel = options.imageLabel,
+		aspectMode = options.aspectMode or "stretch",
+		resampleMode = options.resampleMode or "Pixelated",
+		viewport = options.viewport,
+		viewportConnection = nil,
+		aspectConstraint = nil,
+		appliedSettings = nil,
 		headless = options.headless,
 		image = nil,
 	}, Video)
@@ -828,6 +836,7 @@ function Video.new(bus: any, options: any?): any
 	end
 	local oldRead: any = bus.memoryReadHook
 	local oldWrite: any = bus.memoryWriteHook
+	self.directMemorySafe = oldRead == nil and oldWrite == nil
 	bus.memoryReadHook = function(addr: number): number?
 		if self.mode == 0x13 and bit32.band(self.seq[4] or 0, 8) == 0 and addr >= 0xA0000 and addr < 0xB0000 then
 			return buffer.readu8(self.planes[(self.gc[4] or 0) % 4 + 1], addr - 0xA0000)
@@ -852,6 +861,8 @@ function Video.new(bus: any, options: any?): any
 		end
 		return false
 	end
+	bus.videoMemoryReadHook = bus.memoryReadHook
+	bus.videoMemoryWriteHook = bus.memoryWriteHook
 	local function port(n: number, read: (() -> number)?, write: ((number) -> ())?)
 		bus:registerPortHandler(n, read, write)
 	end
@@ -930,7 +941,79 @@ function Video.new(bus: any, options: any?): any
 	end)
 	bus.video = self
 	self:setMode(3)
+	if not self.headless and self.imageLabel and self.imageLabel.Parent then
+		self.viewportConnection = self.imageLabel.Parent:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			self:setDisplaySettings({})
+		end)
+	end
 	return self
+end
+-- Layout is calculated in headless mode too, allowing deterministic tests.
+function Video.setDisplaySettings(self: any, settings: any?)
+	settings = settings or {}
+	local aspect = settings.aspectMode or self.aspectMode
+	local resample = settings.resampleMode or self.resampleMode
+	local resampleType: string = typeof(resample)
+	if resampleType == "EnumItem" then
+		resample = resample.Name
+	end
+	assert(
+		aspect == "stretch" or aspect == "4:3" or aspect == "16:10" or aspect == "integer",
+		"unsupported aspect mode"
+	)
+	assert(resample == "Pixelated" or resample == "Default", "unsupported resample mode")
+	self.aspectMode = aspect
+	self.resampleMode = resample
+	if settings.viewport then
+		self.viewport = settings.viewport
+	end
+	local viewport = self.viewport
+	if not viewport and not self.headless and self.imageLabel and self.imageLabel.Parent then
+		viewport = self.imageLabel.Parent.AbsoluteSize
+	end
+	local vw = if viewport then (viewport.X or viewport.x or viewport.width or self.width) else self.width
+	local vh = if viewport then (viewport.Y or viewport.y or viewport.height or self.height) else self.height
+	local scale = math.max(1, math.floor(math.min(vw / self.width, vh / self.height)))
+	self.appliedSettings = {
+		aspectMode = aspect,
+		resampleMode = resample,
+		scale = scale,
+		width = if aspect == "integer" then self.width * scale else vw,
+		height = if aspect == "integer" then self.height * scale else vh,
+	}
+	if self.headless or not self.imageLabel then
+		return
+	end
+	local label = self.imageLabel
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.Position = UDim2.fromScale(0.5, 0.5)
+	label.Size = if aspect == "integer"
+		then UDim2.fromOffset(self.width * scale, self.height * scale)
+		else UDim2.fromScale(1, 1)
+	label.ResampleMode = if resample == "Default" then Enum.ResamplerMode.Default else Enum.ResamplerMode.Pixelated
+	local constraint = self.aspectConstraint or label:FindFirstChildOfClass("UIAspectRatioConstraint")
+	if aspect == "4:3" or aspect == "16:10" then
+		if not constraint then
+			constraint = Instance.new("UIAspectRatioConstraint")
+			constraint.Parent = label
+		end
+		constraint.AspectType = Enum.AspectType.FitWithinMaxSize
+		constraint.AspectRatio = if aspect == "4:3" then 4 / 3 else 16 / 10
+	elseif constraint then
+		constraint:Destroy()
+		constraint = nil
+	end
+	self.aspectConstraint = constraint
+end
+function Video.destroy(self: any)
+	if self.viewportConnection then
+		self.viewportConnection:Disconnect()
+		self.viewportConnection = nil
+	end
+	if self.image then
+		self.image:Destroy()
+		self.image = nil
+	end
 end
 function Video.setPalette(self: any, index: number, r: number, g: number, b: number)
 	index = math.floor(index) % 256
@@ -950,6 +1033,9 @@ function Video.getPalette(self: any, index: number): (number, number, number)
 	return p[1], p[2], p[3]
 end
 function Video.setMode(self: any, mode: number, preserve: boolean?)
+	if self.textRegions then
+		self.textRegions:clear()
+	end
 	preserve = preserve or bit32.band(mode, 0x80) ~= 0
 	mode = bit32.band(mode, 0x7f)
 	assert(
@@ -976,6 +1062,7 @@ function Video.setMode(self: any, mode: number, preserve: boolean?)
 			buffer.fill(plane, 0, 0, 65536)
 		end
 	end
+	self:setDisplaySettings({})
 	self.bus:write8(0x449, mode)
 	self.bus:write16(0x44a, if mode == 3 then 80 else 40)
 	self.bus:write16(0x450, 0)
@@ -1178,6 +1265,7 @@ function Video.render(self: any): buffer
 	local h = if planar and self.crtc[0x12] == 0xdf and bit32.band(self.crtc[7] or 0, 2) ~= 0 then 240 else 200
 	if self.height ~= h then
 		self.height = h
+		self:setDisplaySettings({})
 		self.pixels = buffer.create(self.width * h * 4)
 		if self.image then
 			self.image:Destroy()
@@ -1185,55 +1273,159 @@ function Video.render(self: any): buffer
 		end
 	end
 	local pixels = self.pixels
-	for y = 0, self.height - 1 do
-		for x = 0, self.width - 1 do
-			local color: number
-			if self.mode == 3 then
-				local cell = 0xB8000 + (math.floor(y / 8) * 80 + math.floor(x / 8)) * 2
-				local ch = bus:read8(cell)
-				local attr = bus:read8(cell + 1)
-				local bits = buffer.readu8(font, ch * 8 + y % 8)
-				local foreground = bit32.band(bits, bit32.rshift(0x80, x % 8)) ~= 0 and (attr < 128 or self.blinkPhase)
-				local cursor = bus:read16(0x450)
-				local cursorShape = bus:read16(0x460)
-				local start = bit32.band(bit32.rshift(cursorShape, 8), 31)
-				local finish = bit32.band(cursorShape, 31)
-				if
-					self.blinkPhase
-					and bit32.band(cursorShape, 0x2000) == 0
-					and cursor % 256 == math.floor(x / 8)
-					and math.floor(cursor / 256) % 256 == math.floor(y / 8)
-					and y % 8 >= start
-					and y % 8 <= finish
-				then
-					foreground = true
-				end
-				color = if foreground then attr % 16 else math.floor(attr / 16) % 8
-			elseif self.mode == 0x13 then
-				if planar then
-					color = buffer.readu8(self.planes[x % 4 + 1], math.floor(y * self.width / 4) + math.floor(x / 4))
+	local ram: buffer = bus.ram
+	local pal: buffer = self.paletteRGBA
+	-- Unknown bus hooks and wrapped small RAM retain the general bus path.
+	local direct = self.directMemorySafe
+		and bus.memoryReadHook == bus.videoMemoryReadHook
+		and buffer.len(ram) >= 0xc0000
+	if not direct then
+		for y = 0, self.height - 1 do
+			for x = 0, self.width - 1 do
+				local color: number
+				if self.mode == 3 then
+					local cell = 0xB8000 + (math.floor(y / 8) * 80 + math.floor(x / 8)) * 2
+					local ch = bus:read8(cell)
+					local attr = bus:read8(cell + 1)
+					local bits = buffer.readu8(font, ch * 8 + y % 8)
+					local foreground = bit32.band(bits, bit32.rshift(0x80, x % 8)) ~= 0
+						and (attr < 128 or self.blinkPhase)
+					local cursor = bus:read16(0x450)
+					local cursorShape = bus:read16(0x460)
+					local start = bit32.band(bit32.rshift(cursorShape, 8), 31)
+					local finish = bit32.band(cursorShape, 31)
+					if
+						self.blinkPhase
+						and bit32.band(cursorShape, 0x2000) == 0
+						and cursor % 256 == math.floor(x / 8)
+						and math.floor(cursor / 256) % 256 == math.floor(y / 8)
+						and y % 8 >= start
+						and y % 8 <= finish
+					then
+						foreground = true
+					end
+					color = if foreground then attr % 16 else math.floor(attr / 16) % 8
+				elseif self.mode == 0x13 then
+					if planar then
+						color =
+							buffer.readu8(self.planes[x % 4 + 1], math.floor(y * self.width / 4) + math.floor(x / 4))
+					else
+						color = bus:read8(0xA0000 + y * 320 + x)
+					end
 				else
-					color = bus:read8(0xA0000 + y * 320 + x)
+					local off = math.floor(y / 2) * 80 + (y % 2) * 8192
+					if self.mode == 6 then
+						local v = bus:read8(0xB8000 + off + math.floor(x / 8))
+						color = if bit32.band(v, bit32.rshift(0x80, x % 8)) ~= 0 then 15 else 0
+					else
+						local v = bus:read8(0xB8000 + off + math.floor(x / 4))
+						local c = bit32.band(bit32.rshift(v, 6 - 2 * (x % 4)), 3)
+						local base = if bit32.band(self.cgaColor, 0x20) ~= 0
+							then ({ 0, 3, 5, 7 })[c + 1]
+							else ({ 0, 2, 4, 6 })[c + 1]
+						color = if c == 0
+							then bit32.band(self.cgaColor, 15)
+							else base + (if bit32.band(self.cgaColor, 0x10) ~= 0 then 8 else 0)
+					end
 				end
-			else
-				local off = math.floor(y / 2) * 80 + (y % 2) * 8192
-				if self.mode == 6 then
-					local v = bus:read8(0xB8000 + off + math.floor(x / 8))
-					color = if bit32.band(v, bit32.rshift(0x80, x % 8)) ~= 0 then 15 else 0
-				else
-					local v = bus:read8(0xB8000 + off + math.floor(x / 4))
-					local c = bit32.band(bit32.rshift(v, 6 - 2 * (x % 4)), 3)
-					local base = if bit32.band(self.cgaColor, 0x20) ~= 0
-						then ({ 0, 3, 5, 7 })[c + 1]
-						else ({ 0, 2, 4, 6 })[c + 1]
-					color = if c == 0
-						then bit32.band(self.cgaColor, 15)
-						else base + (if bit32.band(self.cgaColor, 0x10) ~= 0 then 8 else 0)
+				buffer.writeu32(pixels, (y * self.width + x) * 4, buffer.readu32(self.paletteRGBA, color * 4))
+			end
+		end
+	elseif self.mode == 0x13 and not planar then
+		for i = 0, 63999 do
+			buffer.writeu32(pixels, i * 4, buffer.readu32(pal, buffer.readu8(ram, 0xa0000 + i) * 4))
+		end
+	elseif self.mode == 0x13 then
+		local p1: buffer, p2: buffer, p3: buffer, p4: buffer =
+			self.planes[1], self.planes[2], self.planes[3], self.planes[4]
+		for i = 0, self.height * 80 - 1 do
+			local dst = i * 16
+			buffer.writeu32(pixels, dst, buffer.readu32(pal, buffer.readu8(p1, i) * 4))
+			buffer.writeu32(pixels, dst + 4, buffer.readu32(pal, buffer.readu8(p2, i) * 4))
+			buffer.writeu32(pixels, dst + 8, buffer.readu32(pal, buffer.readu8(p3, i) * 4))
+			buffer.writeu32(pixels, dst + 12, buffer.readu32(pal, buffer.readu8(p4, i) * 4))
+		end
+	elseif self.mode == 3 then
+		local cursor = bus:read16(0x450)
+		local shape = bus:read16(0x460)
+		local cursorX = cursor % 256
+		local cursorY = math.floor(cursor / 256) % 256
+		local first = bit32.band(bit32.rshift(shape, 8), 31)
+		local last = bit32.band(shape, 31)
+		local cursorEnabled = self.blinkPhase and bit32.band(shape, 0x2000) == 0
+		for row = 0, 24 do
+			for col = 0, 79 do
+				local offset = 0xb8000 + (row * 80 + col) * 2
+				local ch = buffer.readu8(ram, offset)
+				local attr = buffer.readu8(ram, offset + 1)
+				local fg = buffer.readu32(pal, (attr % 16) * 4)
+				local bg = buffer.readu32(pal, (math.floor(attr / 16) % 8) * 4)
+				local show = attr < 128 or self.blinkPhase
+				local isCursor = cursorEnabled and row == cursorY and col == cursorX
+				for gy = 0, 7 do
+					local bits = if show then buffer.readu8(font, ch * 8 + gy) else 0
+					if isCursor and gy >= first and gy <= last then
+						bits = 255
+					end
+					local dst = ((row * 8 + gy) * 640 + col * 8) * 4
+					for gx = 0, 7 do
+						buffer.writeu32(
+							pixels,
+							dst + gx * 4,
+							if bit32.band(bits, bit32.rshift(128, gx)) ~= 0 then fg else bg
+						)
+					end
 				end
 			end
-			buffer.writeu32(pixels, (y * self.width + x) * 4, buffer.readu32(self.paletteRGBA, color * 4))
+		end
+	else
+		local mono = self.mode == 6
+		local c0: number
+		local c1: number
+		local c2: number
+		local c3: number
+		if mono then
+			c0 = buffer.readu32(pal, 0)
+			c1 = buffer.readu32(pal, 60)
+			c2 = 0
+			c3 = 0
+		else
+			local bright = if bit32.band(self.cgaColor, 0x10) ~= 0 then 8 else 0
+			local cyan = bit32.band(self.cgaColor, 0x20) ~= 0
+			c0 = buffer.readu32(pal, bit32.band(self.cgaColor, 15) * 4)
+			c1 = buffer.readu32(pal, ((if cyan then 3 else 2) + bright) * 4)
+			c2 = buffer.readu32(pal, ((if cyan then 5 else 4) + bright) * 4)
+			c3 = buffer.readu32(pal, ((if cyan then 7 else 6) + bright) * 4)
+		end
+		for y = 0, 199 do
+			local base = 0xb8000 + math.floor(y / 2) * 80 + (y % 2) * 8192
+			local row = y * self.width * 4
+			for col = 0, 79 do
+				local v = buffer.readu8(ram, base + col)
+				if mono then
+					local dst = row + col * 32
+					for bit = 0, 7 do
+						buffer.writeu32(
+							pixels,
+							dst + bit * 4,
+							if bit32.band(v, bit32.rshift(128, bit)) ~= 0 then c1 else c0
+						)
+					end
+				else
+					local dst = row + col * 16
+					for n = 0, 3 do
+						local color = bit32.band(bit32.rshift(v, 6 - 2 * n), 3)
+						buffer.writeu32(
+							pixels,
+							dst + n * 4,
+							if color == 0 then c0 elseif color == 1 then c1 elseif color == 2 then c2 else c3
+						)
+					end
+				end
+			end
 		end
 	end
+	self.frameGeneration += 1
 	self.vramDirty = false
 	self.paletteDirty = false
 	if not self.headless and self.imageLabel then
@@ -1242,11 +1434,7 @@ function Video.render(self: any): buffer
 			self.image = assetService:CreateEditableImage({ Size = Vector2.new(self.width, self.height) })
 			if self.image then
 				self.imageLabel.ImageContent = Content.fromObject(self.image)
-				self.imageLabel.ResampleMode = Enum.ResamplerMode.Pixelated
-				local aspect = self.imageLabel:FindFirstChildOfClass("UIAspectRatioConstraint")
-					or Instance.new("UIAspectRatioConstraint")
-				aspect.AspectRatio = 4 / 3
-				aspect.Parent = self.imageLabel
+				self:setDisplaySettings({})
 			end
 		end
 		if self.image then
@@ -1256,6 +1444,16 @@ function Video.render(self: any): buffer
 		end
 	end
 	return pixels
+end
+function Video.getInputContext(self: any): any
+	-- Recognition is demand-driven, never part of the per-pixel render loop.
+	if self.vramDirty or self.paletteDirty then
+		self:render()
+	end
+	if not self.textRegions then
+		self.textRegions = TextRegions.new(self.bus)
+	end
+	return self.textRegions:refresh(self)
 end
 function Video.present(self: any, now: number?)
 	local phase = math.floor((now or self.blinkClock()) * 2)

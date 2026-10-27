@@ -28,7 +28,25 @@ keyboard input, and PIT speaker notes. Any key changes color; Escape exits.
 Open `dist/dos2luau.rbxmx` or the verified binary `dist/dos2luau.rbxm` in Studio.
 Move `DOS2Luau` into `ReplicatedStorage`, and move `DOSDemo` into
 `StarterPlayerScripts`. Alternatively, sync `default.project.json` with Rojo.
-Play on the client. The example creates a pixelated, 4:3 ImageLabel.
+Play on the client. The example creates a full-screen, pixelated ImageLabel.
+Press **F10** or **Right Control + comma**, or tap the small fading gear, to open
+emulator settings. Aspect ratio, filtering, scanlines, speed, volume, touch controls and menu assist
+controls apply immediately. Settings last for the current client session.
+
+Keyboard/mouse and gamepad input keep the touch quick bar and thumb ring hidden.
+Auto mode uses the last active input type, including on touchscreen laptops.
+Left touch drag holds directional keys by default. Screen assist is opt-in:
+numbered menu clicks, continue taps, gamepad choice highlighting and the waiting
+quick bar are disabled for the generic runtime. The `--oregon` build enables
+them explicitly. Menu assist can also be toggled in settings. With it enabled,
+D-pad moves the choice outline and A confirms the selected digit plus Enter.
+The Type button opens the platform keyboard where supported. Force On/Off touch
+overrides are available in settings; they do not enable menu assist.
+
+The full-screen black backing layer covers the Roblox world in fitted aspect
+modes. The example disables local avatar movement, jumping, character sounds and
+the emote wheel, and uses a scriptable camera while active. Cleanup restores
+the prior character/UI state. DOS audio remains separately controlled.
 
 The demo generates `examples/square-440.wav`. Upload that waveform to an
 account/experience with audio permission, then set `speakerAssetId` in the
@@ -83,6 +101,18 @@ Flat 32-bit traces use `{ "eip": 4096 }`. Serialize this through HttpService
 in Studio. Traces identify fallback addresses; code generated or unpacked only
 at runtime cannot be recovered from address-only traces of the packed file.
 
+`Video:setDisplaySettings({aspectMode="stretch",resampleMode="Pixelated"})`
+also accepts aspect modes `"4:3"`, `"16:10"`, `"integer"` and filter `"Default"`.
+Roblox resampler enum values are accepted. Layout and filter survive guest video
+mode changes. Integer scaling recalculates when the viewport changes.
+`scheduler:setSpeedPreset("turbo"|"xt"|"286"|"386")` selects approximate
+instruction rates, and `audio:setMasterGain(0..1)` changes all playing channels.
+The MHz labels identify speed profiles; they do not model processor cycles.
+`VirtualInputRouter.new(machine, options)` accepts `smartMenuClick`,
+`tapToContinue`, `gamepadMenuHighlight`, `touchQuickBar` (all default false), and
+`touchThumbstick` (default true). `router:setMenuAssist(boolean)` toggles the
+first four together. Native INT 33h mouse forwarding stays active.
+
 ## Implemented paths and boundaries
 
 | Area | Implemented | Material boundary |
@@ -95,7 +125,8 @@ at runtime cannot be recovered from address-only traces of the packed file.
 | Video | CP437 text/cursor, CGA 4/5/6, VGA 13h, basic Mode X, DAC, BIOS scroll; live Studio image upload verified | VGA latches/write modes/CRTC behavior and sustained frame-time validation are incomplete |
 | x87 | Host-double stack, selected loads/stores/arithmetic/trigonometry/status | No 80-bit precision, rounding-mode enforcement or full exception behavior |
 | Audio | Continuously looping speaker gate/pitch, approximate OPL carrier/envelopes, DMA sample hashes and completion IRQs | OPL is not sample-accurate FM; PCM requires pre-registered audio assets |
-| Scheduling | dt credit and wall-time deadline, 20,000-instruction PIT intervals, keyboard make/break and BDA queue | Timing and hardware behavior are approximations; no claim of cycle-accurate PC emulation |
+| Scheduling | First three PIT ticks use 20,000 instructions each; interactive turbo then targets 3.5M IPS with wall-clock PIT, bounded REP batching and 512-instruction deadline checks; backpressured input queue | Headless/deterministic runs retain exact instruction pacing; speed profiles are approximate |
+| Input/UI | Full-screen display settings, native text bridge, touch/gamepad routing, current text VRAM regions and graphics menu recognition | Graphics labels are approximate; unusual BGI fonts/backgrounds can prevent hit-testing or continue-prompt recognition; physical mobile/console keyboards are unverified |
 
 DOS file writes affect the in-memory VFS. Persist the resulting data explicitly
 if an experience needs saves across sessions. Unknown BIOS interrupts have
@@ -103,6 +134,7 @@ guest-visible return stubs; unknown DOS/DPMI services report an error.
 
 ## Verification
 
+`bun run test` includes compiler, runtime, REP, video, input and settings suites.
 `bun run test:runtime` stages static Roblox module paths as relative Lune
 imports, then runs the original typed module bodies. It checks full CPU/RAM
 parity at budget boundaries, relocation, self-modifying code, register/flag
@@ -127,7 +159,7 @@ DOOM and Quake have not been verified.
 The downloaded test edition is the Internet Archive's
 [Oregon Trail 1990 DOS archive](https://archive.org/details/msdos_Oregon_Trail_The_1990).
 Its LZEXE unpacking happens offline. The AOT build discovers 35,925 instruction
-blocks, with 11,546 directly lifted before runtime invalidation. The optional
+blocks, with 21,345 directly lifted before runtime invalidation. The optional
 parity probe compares the full CPU, 1 MiB RAM and VGA framebuffer against
 interpreter-only execution for the menu-to-naming scenario.
 

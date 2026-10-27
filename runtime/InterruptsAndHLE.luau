@@ -773,6 +773,10 @@ function HLE.handleTrap(self: any, c: any, bus: any): boolean
 		c.ip = 0x600
 		Interpreter.interrupt(c, bus, 0x1c)
 		return true
+	elseif v == 9 then
+		-- BDA words are queued by the input bridge. Consume the controller's
+		-- make/break byte here; guest-installed IRQ 09h handlers still own theirs.
+		bus:in8(0x60)
 	elseif v == 0x1c then
 	elseif v == 0x20 then
 		c.halted = true

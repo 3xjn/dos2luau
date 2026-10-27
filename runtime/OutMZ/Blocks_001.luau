@@ -19,12 +19,16 @@ end
 
 blocks[5] = function(cpu: any, bus: any, budget: number): (number, number)
 	if budget <= 0 then return CPU.key(cpu), budget end
+	do
 	CPU.setReg(cpu, 0, 16, 7)
+	end
 	cpu.ip = 8
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1
 	if budget <= 0 then return cpu.currentBlockKey, budget end
+	do
 	CPU.setReg(cpu, 0, 16, CPU.alu(cpu, "add", CPU.getReg(cpu, 0, 16), 8, 16))
+	end
 	cpu.ip = 11
 	cpu.currentBlockKey = CPU.key(cpu)
 	budget -= 1

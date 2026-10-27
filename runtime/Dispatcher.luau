@@ -86,13 +86,17 @@ function Dispatcher.run(self: any, c: any, b: any, budget: any, deadline: any)
 	if (self.meta.mode32 == true) == (c.mode32 == true) then
 		self:initialize(c, b)
 	end
-	while
-		budget > 0
-		and not c.halted
-		and not c.waitingForKey
-		and not c.yieldRequested
-		and (not deadline or os.clock() < deadline)
-	do
+	local previousDeadline = b.executionDeadline
+	b.executionDeadline = deadline
+	local interval = math.clamp(math.floor(b.clockCheckInterval or 1), 1, 512)
+	local untilCheck = 0
+	while budget > 0 and not c.halted and not c.waitingForKey and not c.yieldRequested do
+		if untilCheck <= 0 then
+			if deadline and os.clock() >= deadline then
+				break
+			end
+			untilCheck = interval
+		end
 		if next(b.invalidatedPages) then
 			for page in pairs(b.invalidatedPages) do
 				local keys = self.blocksByPage[page]
@@ -114,17 +118,19 @@ function Dispatcher.run(self: any, c: any, b: any, budget: any, deadline: any)
 		end
 		local block = if compatibleMode and not self.disabledBlocks[key] then self.blocks[key] else nil
 		if block then
-			local _, remaining = (block :: any)(c, b, budget)
-			if remaining >= budget or remaining < 0 then
+			local slice = math.min(budget, untilCheck)
+			local _, remaining = (block :: any)(c, b, slice)
+			if remaining >= slice or remaining < 0 then
 				error("Compiled block failed to consume instruction budget at " .. tostring(key))
 			end
-			local used = budget - remaining
+			local used = slice - remaining
 			if self.meta.directBlocks and self.meta.directBlocks[key] then
 				self.directInstructions = (self.directInstructions or 0) + used
 			else
 				self.interpretedInstructions = (self.interpretedInstructions or 0) + used
 			end
-			budget = remaining
+			budget -= used
+			untilCheck -= used
 		else
 			c.discoveredBlocks[key] = true
 			local _, cost = Interpreter.step(c, b)
@@ -132,9 +138,11 @@ function Dispatcher.run(self: any, c: any, b: any, budget: any, deadline: any)
 				break
 			end
 			budget -= cost
+			untilCheck -= cost
 			self.interpretedInstructions = (self.interpretedInstructions or 0) + cost
 		end
 	end
+	b.executionDeadline = previousDeadline
 	c.currentBlockKey = CPU.key(c)
 	return budget
 end

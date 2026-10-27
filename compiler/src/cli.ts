@@ -73,6 +73,89 @@ function direct(i: Instruction): string {
       w = op & 1 ? 16 : 8;
     return `local _result = CPU.alu(cpu, "test", CPU.getReg(cpu, ${m & 7}, ${w}), CPU.getReg(cpu, ${(m >> 3) & 7}, ${w}), ${w})`;
   }
+  if (!i.flat && op >= 0x50 && op <= 0x57) {
+    const r = op & 7;
+    return `local v = CPU.getReg(cpu, ${r}, 16)\n\tlocal sp = (CPU.getReg(cpu, 4, 16) - 2) % 65536\n\tCPU.setReg(cpu, 4, 16, sp)\n\tbus:writeSeg16(cpu.ss, sp, v)`;
+  }
+  if (!i.flat && op >= 0x58 && op <= 0x5f) {
+    const r = op & 7;
+    return `local sp = CPU.getReg(cpu, 4, 16)\n\tlocal v = bus:readSeg16(cpu.ss, sp)\n\tCPU.setReg(cpu, 4, 16, sp + 2)\n\tCPU.setReg(cpu, ${r}, 16, v)`;
+  }
+  if (!i.flat && op === 0xe8)
+    return `local sp = (CPU.getReg(cpu, 4, 16) - 2) % 65536\n\tCPU.setReg(cpu, 4, 16, sp)\n\tbus:writeSeg16(cpu.ss, sp, ${(i.ip + i.length) & 65535})\n\tcpu.ip = ${i.targets[0]! & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\treturn cpu.currentBlockKey, budget - 1`;
+  if (!i.flat && (op === 0xc3 || op === 0xc2)) {
+    const adjust = op === 0xc2 ? b[1]! + b[2]! * 256 : 0;
+    return `local sp = CPU.getReg(cpu, 4, 16)\n\tlocal target = bus:readSeg16(cpu.ss, sp)\n\tCPU.setReg(cpu, 4, 16, sp + 2 + ${adjust})\n\tcpu.ip = target\n\tcpu.currentBlockKey = CPU.key(cpu)\n\treturn cpu.currentBlockKey, budget - 1`;
+  }
+  if (!i.flat && [0x80, 0x81, 0x83].includes(op)) {
+    const m = b[1]!,
+      r = (m >> 3) & 7,
+      w = op === 0x80 ? 8 : 16,
+      val =
+        op === 0x81
+          ? b[2]! + b[3]! * 256
+          : op === 0x83 && b[2]! >= 128
+            ? b[2]! - 256
+            : b[2]!,
+      operation = ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"][r]!,
+      call = `CPU.alu(cpu, "${operation}", CPU.getReg(cpu, ${m & 7}, ${w}), ${val}, ${w})`;
+    return r === 7
+      ? `local _result = ${call}`
+      : `CPU.setReg(cpu, ${m & 7}, ${w}, ${call})`;
+  }
+  if (!i.flat && (op === 0xd0 || op === 0xd1)) {
+    const m = b[1]!,
+      kind = (m >> 3) & 7,
+      r = m & 7,
+      w = op === 0xd0 ? 8 : 16,
+      sign = 2 ** (w - 1),
+      mod = 2 ** w;
+    const right = kind === 5 || kind === 7;
+    const cf = right ? "v % 2 ~= 0" : `v >= ${sign}`;
+    const result = right
+      ? kind === 7
+        ? `math.floor(v / 2) + (if v >= ${sign} then ${sign} else 0)`
+        : "math.floor(v / 2)"
+      : `(v * 2) % ${mod}`;
+    const overflow =
+      kind === 5
+        ? `v >= ${sign}`
+        : kind === 7
+          ? "false"
+          : `(result >= ${sign}) ~= carry`;
+    return `local v = CPU.getReg(cpu, ${r}, ${w})\n\tlocal carry = ${cf}\n\tlocal result = ${result}\n\tCPU.setReg(cpu, ${r}, ${w}, result)\n\tlocal _result = CPU.alu(cpu, "or", result, 0, ${w})\n\tcpu.flags = bit32.band(cpu.flags, bit32.bnot(1 + 2048))\n\tif carry then cpu.flags = bit32.bor(cpu.flags, 1) end\n\tif ${overflow} then cpu.flags = bit32.bor(cpu.flags, 2048) end`;
+  }
+  if (!i.flat && (op === 0x8a || op === 0x8b) && b[1]! >> 6 !== 3) {
+    const m = b[1]!,
+      mode = m >> 6,
+      rm = m & 7,
+      w = op & 1 ? 16 : 8,
+      d = (m >> 3) & 7;
+    const terms = [
+      "CPU.getReg(cpu, 3, 16) + CPU.getReg(cpu, 6, 16)",
+      "CPU.getReg(cpu, 3, 16) + CPU.getReg(cpu, 7, 16)",
+      "CPU.getReg(cpu, 5, 16) + CPU.getReg(cpu, 6, 16)",
+      "CPU.getReg(cpu, 5, 16) + CPU.getReg(cpu, 7, 16)",
+      "CPU.getReg(cpu, 6, 16)",
+      "CPU.getReg(cpu, 7, 16)",
+      "CPU.getReg(cpu, 5, 16)",
+      "CPU.getReg(cpu, 3, 16)",
+    ];
+    let expr = terms[rm]!,
+      disp = 0;
+    if (mode === 0 && rm === 6) expr = String(b[2]! + b[3]! * 256);
+    else if (mode === 1) disp = b[2]! >= 128 ? b[2]! - 256 : b[2]!;
+    else if (mode === 2) {
+      const v = b[2]! + b[3]! * 256;
+      disp = v >= 32768 ? v - 65536 : v;
+    }
+    const ss = rm === 2 || rm === 3 || (rm === 6 && mode !== 0);
+    const off = `((${expr}) + ${disp}) % 65536`,
+      seg = ss ? "cpu.ss" : "cpu.ds";
+    return w === 8
+      ? `CPU.setReg(cpu, ${d}, 8, bus:read8(bus.segOffToPhys(${seg}, ${off})))`
+      : `CPU.setReg(cpu, ${d}, 16, bus:readSeg16(${seg}, ${off}))`;
+  }
   if (op === 0x90) return "";
   if (op === 0xd9 && [0xe8, 0xeb, 0xee].includes(b[1]!)) {
     const value = b[1] === 0xe8 ? "1" : b[1] === 0xee ? "0" : "math.pi";
@@ -286,7 +369,8 @@ function block(
     body =
       (i.opcode >= 0x70 && i.opcode <= 0x7f) ||
       i.opcode === 0xeb ||
-      i.opcode === 0xe9
+      i.opcode === 0xe9 ||
+      (!flat && [0xe8, 0xc3, 0xc2].includes(i.opcode))
         ? code
         : `${code}\n\tcpu.ip = ${flat ? (i.ip + i.length) >>> 0 : (i.ip + i.length) & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\treturn cpu.currentBlockKey, budget - 1`;
   } else {
@@ -302,7 +386,7 @@ function block(
             ? fusion && index === seq.length - 1
               ? fusion.branch
               : direct(item)
-            : `${fusion && index === seq.length - 2 ? fusion.compare : direct(item)}\n\tcpu.ip = ${(item.ip + item.length) & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\tbudget -= 1${index < seq.length - 1 ? "\n\tif budget <= 0 then return cpu.currentBlockKey, budget end" : ""}`,
+            : `${fusion && index === seq.length - 2 ? fusion.compare : `do\n\t${direct(item)}\n\tend`}\n\tcpu.ip = ${(item.ip + item.length) & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\tbudget -= 1${index < seq.length - 1 ? "\n\tif budget <= 0 then return cpu.currentBlockKey, budget end" : ""}`,
         )
         .join("\n\t") +
       (seq[seq.length - 1]!.terminal
@@ -331,7 +415,9 @@ function block(
               : fusion && index === seq.length - 2
                 ? fusion.compare
                 : direct(item);
-          return `${expr}\n\tcpu.ip = ${(item.ip + item.length) & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\tbudget -= 1${index >= overwrite && index < seq.length - 1 ? "\n\tif budget <= 0 then return cpu.currentBlockKey, budget end" : ""}`;
+          const scoped =
+            fusion && index === seq.length - 2 ? expr : `do\n\t${expr}\n\tend`;
+          return `${scoped}\n\tcpu.ip = ${(item.ip + item.length) & 65535}\n\tcpu.currentBlockKey = CPU.key(cpu)\n\tbudget -= 1${index >= overwrite && index < seq.length - 1 ? "\n\tif budget <= 0 then return cpu.currentBlockKey, budget end" : ""}`;
         })
         .join("\n\t") +
       (seq[seq.length - 1]!.terminal
@@ -380,11 +466,15 @@ export async function compile(
   const ik = (i: Instruction) => (p.mode32 ? i.ip : key(i.cs, i.ip));
   const byKey = new Map(instructions.map((i) => [ik(i), i]));
   const chains = new Map<number, Instruction[]>();
+  const isolated = (i: Instruction) =>
+    (i.opcode >= 0x50 && i.opcode <= 0x5f) ||
+    ((i.opcode === 0x8a || i.opcode === 0x8b) && i.bytes[1]! >> 6 !== 3);
   for (const first of instructions) {
     const chain: Instruction[] = [];
     let previous = first;
     while (
       !p.mode32 &&
+      !isolated(previous) &&
       previous.opcode !== 0xd8 &&
       previous.opcode !== 0xd9 &&
       previous.opcode !== 0xdd &&
@@ -392,12 +482,13 @@ export async function compile(
       !(previous.opcode >= 0xa0 && previous.opcode <= 0xa3) &&
       !previous.terminal &&
       previous.ip + previous.length < 65536 &&
-      chain.length < 15
+      chain.length < 63
     ) {
       const next = byKey.get(key(previous.cs, previous.ip + previous.length));
       if (
         !next ||
         !next.direct ||
+        isolated(next) ||
         next.opcode === 0xd8 ||
         next.opcode === 0xd9 ||
         next.opcode === 0xdd ||

@@ -154,7 +154,11 @@ export function decode(p: Program, cs: number, ip: number): Instruction {
     !prefix &&
     ((op >= 0xb0 && op <= 0xbf) ||
       op === 0x90 ||
-      (op >= 0x40 && op <= 0x4f) ||
+      (op >= 0x40 && op <= 0x5f) ||
+      op === 0xe8 ||
+      op === 0xc3 ||
+      op === 0xc2 ||
+      ((op === 0x8a || op === 0x8b) && modrm >= 0 && modrm >> 6 !== 3) ||
       (op <= 0x3d && ((op & 7) === 4 || (op & 7) === 5)) ||
       (op >= 0x70 && op <= 0x7f) ||
       op === 0xeb ||
@@ -174,6 +178,9 @@ export function decode(p: Program, cs: number, ip: number): Instruction {
         ((op <= 0x3b && (op & 7) <= 3) ||
           op === 0x84 ||
           op === 0x85 ||
+          [0x80, 0x81, 0x83].includes(op) ||
+          ((op === 0xd0 || op === 0xd1) &&
+            [4, 5, 6, 7].includes((modrm >> 3) & 7)) ||
           (op >= 0x88 && op <= 0x8b))));
   const relocated = p.relocations.some((r) => {
     const at = r.segment * 16 + r.offset;

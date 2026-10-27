@@ -58,10 +58,6 @@ let client = await readFile(
   "utf8",
 );
 if (oregon) {
-  client = client.replace(
-    /hint\.Text\s*=\s*['"]dos2luau • Any key changes color • Esc exits['"]/,
-    "hint.Text='The Oregon Trail • Keyboard controls'",
-  );
   if (!client.includes("-- DOS2LUAU_PROGRAM_OPTIONS"))
     throw Error("Missing program insertion marker");
   client = client.replace(
@@ -71,6 +67,12 @@ if (oregon) {
   blocks=require(ReplicatedStorage.DOS2Luau.OutOregon.Blocks),
   assets=require(ReplicatedStorage.DOS2Luau.OutOregon.VFS_Assets),
   programPath='C:\\\\OREGON.EXE',`,
+  );
+  if (!client.includes("-- DOS2LUAU_INPUT_OPTIONS"))
+    throw Error("Missing input insertion marker");
+  client = client.replace(
+    "-- DOS2LUAU_INPUT_OPTIONS",
+    "smartMenuClick = true, tapToContinue = true, gamepadMenuHighlight = true, touchQuickBar = true,",
   );
 }
 const demo = item("LocalScript", "DOSDemo", client);
