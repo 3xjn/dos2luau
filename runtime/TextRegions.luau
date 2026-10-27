@@ -5,9 +5,25 @@ local Tracker = {}
 Tracker.__index = Tracker
 
 type Region = { text: string, x: number, y: number, width: number, height: number, digit: number? }
-type Context = { regions: { Region }, choices: { number }, continuePrompt: boolean, menu: boolean, generation: number }
+type Context = {
+	regions: { Region },
+	choices: { number },
+	continuePrompt: boolean,
+	menu: boolean,
+	textInput: boolean,
+	confirmPrompt: Region?,
+	generation: number,
+}
 local function blank(generation: number): Context
-	return { regions = {}, choices = {}, continuePrompt = false, menu = false, generation = generation }
+	return {
+		regions = {},
+		choices = {},
+		continuePrompt = false,
+		menu = false,
+		textInput = false,
+		confirmPrompt = nil,
+		generation = generation,
+	}
 end
 function Tracker.new(bus: any, _options: any?): any
 	return setmetatable({ bus = bus, generation = -1, context = blank(-1) }, Tracker)
@@ -44,6 +60,26 @@ local function isPrompt(text: string): boolean
 		or lower:find("continue", 1, true) ~= nil
 		or lower:find("%f[%a]choice%f[%A]") ~= nil
 		or text:match("[?:]%s*$") ~= nil
+end
+-- Confirmation requires an interrogative and a confirmation word in the
+-- visible line. OCR confusables are normalized without guessing an answer.
+local function isConfirmation(text: string): boolean
+	local line = string.lower(text):gsub("%s+", "")
+	if not string.find(line, "?", 1, true) then
+		return false
+	end
+	local prefix = string.sub(line, 1, 3)
+	local interrogative = prefix == "are"
+		or prefix == "is"
+		or prefix:sub(1, 2) == "is"
+		or prefix == "do"
+		or prefix:sub(1, 2) == "do"
+		or prefix == "?pe"
+	if not interrogative then
+		return false
+	end
+	local normalized = line:gsub("p", "r"):gsub("c", "o"):gsub("6", "h")
+	return string.find(normalized, "oorreot", 1, true) ~= nil or string.find(normalized, "sure", 1, true) ~= nil
 end
 local function mergeRow(region: Region, text: string, left: number, right: number, bottom: number)
 	local newLeft = math.min(region.x, left)
@@ -94,6 +130,9 @@ local bgiDigits = {
 	{ 6, 14, 30, 54, 102, 127, 6 },
 	{ 126, 96, 126, 3, 3, 99, 62 },
 	{ 62, 96, 126, 99, 99, 99, 62 },
+	{ 127, 99, 6, 12, 24, 24, 24 },
+	{ 62, 99, 99, 62, 99, 99, 62 },
+	{ 62, 99, 99, 63, 3, 99, 62 },
 }
 local bgiTemplates: { [number]: { rows: { number }, width: number, height: number } } = {}
 for n, source in ipairs(bgiDigits) do
@@ -282,6 +321,34 @@ local function scanGraphics(self: any, video: any, context: Context)
 			end
 			line = table.concat(chars)
 		end
+		-- Empty indexed rows and a low underscore on an indexed row denote
+		-- an active form, rather than a selectable numbered menu.
+		if #parts >= 2 then
+			local a, b = parts[1], parts[2]
+			local _, score = recognize(a.rows, a.right - a.left + 1, a.bottom - a.top + 1, 49, 57)
+			local punct = b.right - b.left + 1 <= 3 and b.bottom - b.top + 1 <= 3 and b.left - a.right <= 6
+			local tail = parts[#parts]
+			local cursor = #parts >= 3
+				and tail.right - tail.left + 1 >= 3
+				and tail.bottom - tail.top + 1 <= 2
+				and tail.bottom >= last - 1
+			if score <= 3 and punct and (#parts == 2 or cursor) then
+				context.textInput = true
+			end
+		end
+		if isConfirmation(line) then
+			local region = append(
+				context,
+				line,
+				parts[1].left / w,
+				top / h,
+				(parts[#parts].right - parts[1].left + 1) / w,
+				height / h
+			)
+			context.confirmPrompt = region
+			context.textInput = true
+			activeChoice = nil
+		end
 		-- A menu requires a digit, a small punctuation mark, and a substantive
 		-- label on the same baseline; all bounding boxes derive from visible ink.
 		local newChoice = false
@@ -442,7 +509,14 @@ function Tracker.refresh(self: any, video: any): Context
 			end
 			if right >= left then
 				local text = string.match(table.concat(chars), "^%s*(.-)%s*$") or ""
-				if string.match(text, "^([1-9])[%.%)]%s+%S") then
+				if string.match(text, "^[1-9][%.%)]%s*$") or string.match(text, "^[1-9][%.%)]%s+.*_%s*$") then
+					context.textInput = true
+				end
+				if isConfirmation(text) then
+					context.confirmPrompt = append(context, text, left / 80, row / 25, (right - left + 1) / 80, 1 / 25)
+					context.textInput = true
+					activeTextChoice = nil
+				elseif string.match(text, "^([1-9])[%.%)]%s+%S") then
 					local region = append(context, text, left / 80, row / 25, (right - left + 1) / 80, 1 / 25)
 					activeTextChoice = if region then { region = region, leftCol = left, lastRow = row } else nil
 				elseif
@@ -463,6 +537,10 @@ function Tracker.refresh(self: any, video: any): Context
 		end
 	else
 		scanGraphics(self, video, context)
+	end
+	if context.textInput then
+		context.menu = false
+		context.choices = {}
 	end
 	expandChoices(context, video.width, video.height)
 	self.generation = generation

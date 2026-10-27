@@ -30,8 +30,8 @@ Move `DOS2Luau` into `ReplicatedStorage`, and move `DOSDemo` into
 `StarterPlayerScripts`. Alternatively, sync `default.project.json` with Rojo.
 Play on the client. The example creates a full-screen, pixelated ImageLabel.
 Press **F10** or **Right Control + comma**, or tap the small fading gear, to open
-emulator settings. Aspect ratio, filtering, scanlines, speed, volume, touch controls and menu assist
-controls apply immediately. Settings last for the current client session.
+emulator settings. Aspect ratio, filtering, scanlines, speed, volume, touch
+controls and menu assist apply immediately. Settings last for the current client session.
 
 Keyboard/mouse and gamepad input keep the touch quick bar and thumb ring hidden.
 Auto mode uses the last active input type, including on touchscreen laptops.
@@ -43,6 +43,12 @@ D-pad and the left thumbstick move the choice outline; A confirms the selected
 digit plus Enter. Mouse hover also outlines a choice. On PC, the first arrow
 press activates the selector, subsequent arrows wrap through choices, and Enter
 confirms. Typing a digit or Backspace returns to manual entry.
+Holding a menu direction scrolls after 320 ms, then every 110 ms. Outside menus,
+held keyboard keys use BIOS typematic repeat with buffer backpressure. Numbered
+name forms stay in text-entry mode; detected confirmation questions show explicit
+Yes/No buttons while screen assist is enabled.
+Confirmation buttons submit the answer and Enter; pass `confirmationEnter=false`
+to the input router for games whose confirmation takes a single keystroke.
 The Type button opens the platform keyboard where supported. Force On/Off touch
 overrides are available in settings; they do not enable menu assist.
 
@@ -53,10 +59,12 @@ the prior character/UI state. DOS audio remains separately controlled.
 
 The demo generates `examples/square-440.wav`. Upload that waveform to an
 account/experience with audio permission, then set `speakerAssetId` in the
-example to its asset ID. Without it, speaker register behavior still runs,
-but there is no audible output. `oplAssetId` similarly supplies the looping
+example to its asset ID. Without it, the runtime uses Roblox's bundled
+`uuhhh.mp3` as an audible fallback; its timbre is approximate. `oplAssetId` supplies the looping
 waveform for the approximate nine-voice instrument pool. PCM playback maps
 FNV-1a sample hashes to separately supplied Roblox audio assets.
+Short speaker pulses retain at least a 50 ms hold, and Turbo temporarily uses
+XT instruction pacing while the speaker gate is active.
 
 Published experiences must enable the Mesh/Image APIs and meet Roblox's
 EditableImage eligibility requirements. See the official

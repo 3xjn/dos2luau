@@ -1,4 +1,5 @@
 --!strict
+local KeyboardInput = require(script.Parent.KeyboardInput)
 local Router = {}
 Router.__index = Router
 local scan: { [string]: { number } } = {
@@ -108,9 +109,13 @@ function Router.new(machine: any, options: any): any
 		pointers = {},
 		connections = {},
 		selected = 1,
+		menuClock = options.menuClock or os.clock,
 		hoveredDigit = nil,
 		menuNavActive = false,
 		stickMenuDir = 0,
+		heldMenuDir = 0,
+		heldMenuSource = nil,
+		menuRepeatTimer = 0,
 		mouseX = 0.5,
 		mouseY = 0.5,
 	}, Router)
@@ -155,15 +160,21 @@ local function validMenu(self: any, context: any, choices: { number }): boolean
 	return not self.suspended
 		and self.machine.cpu.waitingForKey == true
 		and context.menu == true
+		and not context.textInput
 		and (context.kind == nil or context.kind == "prompt")
 		and #choices > 0
 end
 function Router.findHoveredRegion(self: any, x: number, y: number, context: any): any
-	if self.smartMenuClick and context.menu then
+	if self.smartMenuClick and context.menu and not context.textInput then
 		for _, item in ipairs(context.regions or {}) do
 			local region: any = item
-			if region.digit and x >= region.x and x <= region.x + region.width
-				and y >= region.y and y <= region.y + region.height then
+			if
+				region.digit
+				and x >= region.x
+				and x <= region.x + region.width
+				and y >= region.y
+				and y <= region.y + region.height
+			then
 				return region
 			end
 		end
@@ -301,6 +312,8 @@ function Router.tap(self: any, x: number, y: number, button: number?)
 		local r: any = item
 		if
 			self.smartMenuClick
+			and context.menu == true
+			and not context.textInput
 			and x >= r.x
 			and x <= r.x + r.width
 			and y >= r.y
@@ -314,7 +327,11 @@ function Router.tap(self: any, x: number, y: number, button: number?)
 			return
 		end
 	end
-	if self.tapToContinue and (context.continuePrompt or (self.legacyAssist and not context.menu)) then
+	if
+		self.tapToContinue
+		and not context.textInput
+		and (context.continuePrompt or (self.legacyAssist and not context.menu))
+	then
 		self:pulse("Space")
 	end
 end
@@ -372,6 +389,23 @@ function Router.pointerUp(self: any, id: any, x: number, y: number)
 		end
 	end
 end
+function Router.clearMenuHold(self: any, source: string?)
+	if source == nil or self.heldMenuSource == source then
+		self.heldMenuSource = nil
+		self.heldMenuDir = 0
+		self.menuRepeatTimer = 0
+		self.menuHoldSampleAt = nil
+	end
+end
+function Router.holdMenuDirection(self: any, source: string, delta: number)
+	if self.heldMenuSource == source and self.heldMenuDir == delta then
+		return
+	end
+	self.heldMenuSource = source
+	self.heldMenuDir = delta
+	self.menuRepeatTimer = 0.32
+	self.menuHoldSampleAt = self.menuClock()
+end
 function Router.updateMenuHighlight(self: any, context: any?)
 	local c = context or self:getContext()
 	local choices = self:getAvailableChoices(c)
@@ -380,6 +414,7 @@ function Router.updateMenuHighlight(self: any, context: any?)
 		self.hoveredDigit = nil
 		self.menuNavActive = false
 		self.stickMenuDir = 0
+		self:clearMenuHold()
 	else
 		self.selected = math.clamp(self.selected, 1, #choices)
 		local gamepad = self.lastInputType and string.sub(self.lastInputType, 1, 7) == "Gamepad"
@@ -415,6 +450,10 @@ function Router.setMenuAssist(self: any, enabled: boolean)
 	self.gamepadMenuHighlight = enabled
 	self.touchQuickBar = enabled
 	if not enabled then
+		if self.hud and self.hud.setConfirmation then
+			(self.hud.setConfirmation :: any)(self.hud, nil, false)
+		end
+		self:clearMenuHold()
 		self.menuNavActive = false
 		self.hoveredDigit = nil
 		self.stickMenuDir = 0
@@ -428,8 +467,26 @@ function Router.setMenuAssist(self: any, enabled: boolean)
 		(self.hud.setMenuHighlight :: any)(self.hud, nil, false)
 	end
 end
+function Router.answerConfirmation(self: any, answer: string)
+	if self.suspended or not self.smartMenuClick or not self.machine.cpu.waitingForKey then
+		return
+	end
+	local context = self:getContext()
+	if context.confirmPrompt and (answer == "Y" or answer == "N") then
+		self:pulse(answer)
+		if self.options.confirmationEnter ~= false then
+			self:pulse("Enter")
+		end
+		if self.hud and self.hud.setConfirmation then
+			(self.hud.setConfirmation :: any)(self.hud, nil, false)
+		end
+	end
+end
 function Router.gamepadButton(self: any, name: string, down: boolean)
 	local directions = { DPadLeft = "Left", DPadRight = "Right", DPadUp = "Up", DPadDown = "Down" }
+	if directions[name] and not down then
+		self:clearMenuHold("gamepad:" .. name)
+	end
 	local menu: any = nil
 	if
 		self.gamepadMenuHighlight
@@ -447,7 +504,14 @@ function Router.gamepadButton(self: any, name: string, down: boolean)
 			self:setHeld("gamepad", directions[name], false)
 		end
 		if down then
-			self.selected = (self.selected - 1 + (if name == "DPadUp" or name == "DPadLeft" then -1 else 1)) % #list + 1
+			local delta = if name == "DPadUp" or name == "DPadLeft" then -1 else 1
+			if self.heldMenuSource == "gamepad:" .. name then
+				return
+			end
+			self:holdMenuDirection("gamepad:" .. name, delta)
+			self.selected = (self.selected - 1 + delta) % #list + 1
+			self.menuNavActive = true
+			self.hoveredDigit = nil
 			self:updateMenuHighlight(menu)
 		end
 		return
@@ -494,9 +558,11 @@ function Router.gamepadAxis(self: any, name: string, x: number, y: number)
 				local dir = if y > 0.55 then -1 elseif y < -0.55 then 1 else 0
 				if math.abs(y) < 0.3 then
 					self.stickMenuDir = 0
+					self:clearMenuHold("gamepad:stick")
 				end
 				if dir ~= 0 and dir ~= self.stickMenuDir then
 					self.stickMenuDir = dir
+					self:holdMenuDirection("gamepad:stick", dir)
 					self.selected = (self.selected - 1 + dir) % #list + 1
 					self.menuNavActive = true
 					self.hoveredDigit = nil
@@ -508,6 +574,7 @@ function Router.gamepadAxis(self: any, name: string, x: number, y: number)
 			self:updateMenuHighlight(context)
 		end
 		self.stickMenuDir = 0
+		self:clearMenuHold("gamepad:stick")
 		self:setDirection("gamepad:stick", x, -y)
 	elseif name == "Thumbstick2" then
 		self.mouseDX = if math.abs(x) > 0.35 then x else 0
@@ -521,6 +588,7 @@ function Router.requestKeyboard(self: any)
 	end
 end
 function Router.releaseAll(self: any)
+	self:clearMenuHold()
 	self.hoveredDigit = nil
 	self.menuNavActive = false
 	self.stickMenuDir = 0
@@ -542,9 +610,33 @@ function Router.releaseAll(self: any)
 	end
 end
 function Router.update(self: any, dt: number)
+	if self.keyboardInput then
+		self.keyboardInput:poll()
+	end
+	local frameContext: any = nil
 	if self.machine.cpu.waitingForKey and (self.smartMenuClick or self.tapToContinue or self.gamepadMenuHighlight) then
 		local context = self:getContext()
+		frameContext = context
 		if self.gamepadMenuHighlight then
+			local list = self:getAvailableChoices(context)
+			if self.heldMenuSource and validMenu(self, context, list) then
+				local elapsed = math.max(0, dt)
+				if self.running and not self.options.headless then
+					local now = self.menuClock()
+					elapsed = math.min(elapsed, math.max(0, now - (self.menuHoldSampleAt or now)))
+					self.menuHoldSampleAt = now
+				end
+				self.menuRepeatTimer -= elapsed
+				if self.menuRepeatTimer <= 0 then
+					local repeats = math.floor(-self.menuRepeatTimer / 0.11) + 1
+					self.menuRepeatTimer += repeats * 0.11
+					self.selected = (self.selected - 1 + self.heldMenuDir * repeats) % #list + 1
+					self.menuNavActive = true
+					self.hoveredDigit = nil
+				end
+			elseif self.heldMenuSource then
+				self:clearMenuHold()
+			end
 			self:updateMenuHighlight(context)
 		end
 	end
@@ -552,6 +644,7 @@ function Router.update(self: any, dt: number)
 		(self.hud.setMenuHighlight :: any)(self.hud, nil, false)
 	end
 	if not self.machine.cpu.waitingForKey then
+		self:clearMenuHold()
 		self.hoveredDigit = nil
 		self.menuNavActive = false
 		self.stickMenuDir = 0
@@ -571,6 +664,12 @@ function Router.update(self: any, dt: number)
 	end
 	if self.hud then
 		self.hud:setWaiting(self.machine.cpu.waitingForKey)
+		if self.hud.setConfirmation then
+			self.hud:setConfirmation(
+				if frameContext then frameContext.confirmPrompt else nil,
+				self.smartMenuClick and self.machine.cpu.waitingForKey and not self.suspended
+			)
+		end
 	end
 end
 function Router.normalizePosition(self: any, position: any, _guiService: any): (number, number)
@@ -613,6 +712,9 @@ function Router.setSettings(self: any, settings: any)
 	self.settings = settings
 end
 function Router.setSuspended(self: any, suspended: boolean)
+	if self.keyboardInput then
+		self.keyboardInput:guardHeld()
+	end
 	self.suspended = suspended
 	if suspended and self.hud and self.hud.setMenuHighlight then
 		(self.hud.setMenuHighlight :: any)(self.hud, nil, false)
@@ -628,6 +730,9 @@ function Router.setSuspended(self: any, suspended: boolean)
 end
 function Router.keyboardEvent(self: any, name: string, down: boolean)
 	name = keypad[name] or name
+	if not down then
+		self:clearMenuHold("physical:" .. name)
+	end
 	if self.settings and name == "F10" then
 		if down then
 			self.settings:toggle()
@@ -670,11 +775,17 @@ function Router.keyboardEvent(self: any, name: string, down: boolean)
 		local context = self:getContext()
 		local list = self:getAvailableChoices(context)
 		if validMenu(self, context, list) then
-			local delta = if name == "Up" or name == "Left" then -1
-				elseif name == "Down" or name == "Right" then 1 else nil
+			local delta = if name == "Up" or name == "Left"
+				then -1
+				elseif name == "Down" or name == "Right" then 1
+				else nil
 			if delta then
 				self:setHeld("physical", name, false)
 				if down then
+					if self.heldMenuSource == "physical:" .. name then
+						return
+					end
+					self:holdMenuDirection("physical:" .. name, delta)
 					if self.menuNavActive or self.hoveredDigit ~= nil then
 						self.selected = (self.selected - 1 + delta) % #list + 1
 					else
@@ -702,6 +813,7 @@ function Router.keyboardEvent(self: any, name: string, down: boolean)
 			end
 			if down and (name == "Zero" or table.find(digits, name) ~= nil or name == "Backspace") then
 				self.menuNavActive = false
+				self:clearMenuHold()
 				self.hoveredDigit = nil
 				self:updateMenuHighlight(context)
 			end
@@ -721,6 +833,19 @@ function Router.start(self: any)
 	end
 	self.running = true
 	local input = self.options.inputService or game:GetService("UserInputService")
+	self.keyboardInput = KeyboardInput.new(input, function(name: string, down: boolean)
+		if
+			not down
+			and input:GetFocusedTextBox() ~= nil
+			and name == "RightControl"
+			and not self.forwardedRightControl
+		then
+			self.pendingRightControl = false
+		else
+			self:keyboardEvent(name, down)
+		end
+	end)
+	self.keyboardInput:start()
 	self:setInputType(input:GetLastInputType().Name)
 	self.connections[#self.connections + 1] = input.LastInputTypeChanged:Connect(function(kind: any)
 		self:setInputType(kind.Name)
@@ -733,9 +858,7 @@ function Router.start(self: any)
 		local kind = obj.UserInputType.Name
 		local name = obj.KeyCode.Name
 		if kind == "Keyboard" then
-			if input:GetFocusedTextBox() == nil then
-				self:keyboardEvent(name, true)
-			end
+			self.keyboardInput:began(name)
 			return
 		end
 		if string.sub(kind, 1, 7) == "Gamepad" then
@@ -766,11 +889,7 @@ function Router.start(self: any)
 		local kind = obj.UserInputType.Name
 		local name = obj.KeyCode.Name
 		if kind == "Keyboard" then
-			if input:GetFocusedTextBox() ~= nil and name == "RightControl" and not self.forwardedRightControl then
-				self.pendingRightControl = false
-			else
-				self:keyboardEvent(name, false)
-			end
+			self.keyboardInput:ended(name)
 		elseif self.suspended then
 			return
 		elseif kind == "Touch" then
@@ -810,6 +929,10 @@ function Router.start(self: any)
 end
 function Router.stop(self: any)
 	self.running = false
+	if self.keyboardInput then
+		self.keyboardInput:destroy()
+		self.keyboardInput = nil
+	end
 	for _, c in ipairs(self.connections) do
 		c:Disconnect()
 	end

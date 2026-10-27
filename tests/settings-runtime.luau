@@ -122,16 +122,13 @@ assert(not bad, "constructor rejects unknown preset")
 local initialSpeaker = fake()
 local initialPCM = fake()
 local initialVoice = fake()
-local initialAudio: any = Audio.new(
-	Bus.new(),
-	{
-		headless = true,
-		speakerSound = initialSpeaker,
-		pcmSound = initialPCM,
-		oplSounds = { initialVoice },
-		masterGain = 0.25,
-	}
-)
+local initialAudio: any = Audio.new(Bus.new(), {
+	headless = true,
+	speakerSound = initialSpeaker,
+	pcmSound = initialPCM,
+	oplSounds = { initialVoice },
+	masterGain = 0.25,
+})
 eq(initialAudio.masterGain, 0.25, "constructor master gain")
 initialAudio:bell()
 near(initialSpeaker.Volume, 0.05, "constructor gain affects bell")
@@ -169,3 +166,10 @@ keyboardScheduler:handleInputBegan(
 )
 eq(#captured, 2, "processed non-keyboard ignored")
 print("PASS legacy keyboard input respects textbox focus")
+focused = nil
+keyboardScheduler.keyboardInput:ended("I")
+keyboardScheduler.keyboardInput:ended("O")
+eq(#captured, 2, "normal I/O releases do not duplicate makes")
+keyboardScheduler.keyboardInput:ended("I")
+keyboardScheduler.keyboardInput:ended("O")
+eq(table.concat(captured, ","), "I,O,I,O", "legacy orphan camera keys recovered")

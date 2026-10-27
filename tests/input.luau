@@ -309,6 +309,16 @@ check("processed keyboard still reaches DOS unless a textbox is focused", functi
 	assert(not s.held.Period)
 	input.InputBegan:fire(period, true)
 	assert(pop(b) == nil and not s.held.Period)
+	focused = nil
+	local iKey = { UserInputType = { Name = "Keyboard" }, KeyCode = { Name = "I" } }
+	local oKey = { UserInputType = { Name = "Keyboard" }, KeyCode = { Name = "O" } }
+	input.InputEnded:fire(iKey)
+	input.InputEnded:fire(oKey)
+	assert(pop(b) == 0x1769 and pop(b) == 0x186f and pop(b) == nil)
+	input.InputBegan:fire(iKey, true)
+	input.InputEnded:fire(iKey)
+	assert(pop(b) == 0x1769 and pop(b) == nil, "complete I press is not duplicated")
+	focused = {}
 	local button = { UserInputType = { Name = "Gamepad1" }, KeyCode = { Name = "ButtonA" } }
 	input.InputBegan:fire(button, true)
 	assert(#r.queue == 0)

@@ -28,7 +28,18 @@ local function textContext(source: { string }, shifts: { [number]: number }?): (
 	local video = { mode = 3, width = 640, height = 200, frameGeneration = 1 }
 	return Tracker.new(bus):refresh(video), bus
 end
-local function graphicsContext(source: { string }, shifts: { [number]: number }?): (any, any)
+local bgiDigits = {
+	{ 12, 60, 12, 12, 12, 12, 63 },
+	{ 62, 99, 3, 14, 56, 96, 127 },
+	{ 62, 99, 3, 30, 3, 99, 62 },
+	{ 6, 14, 30, 54, 102, 127, 6 },
+	{ 126, 96, 126, 3, 3, 99, 62 },
+	{ 62, 96, 126, 99, 99, 99, 62 },
+	{ 127, 99, 6, 12, 24, 24, 24 },
+	{ 62, 99, 99, 62, 99, 99, 62 },
+	{ 62, 99, 99, 63, 3, 99, 62 },
+}
+local function graphicsContext(source: { string }, shifts: { [number]: number }?, bgi: boolean?): (any, any)
 	local bus = Bus.new()
 	local pixels = buffer.create(320 * 200 * 4)
 	for i = 0, 320 * 200 - 1 do
@@ -38,7 +49,11 @@ local function graphicsContext(source: { string }, shifts: { [number]: number }?
 		for col = 1, #text do
 			local ch = string.byte(text, col)
 			for y = 0, 7 do
-				local bits = buffer.readu8(Font, ch * 8 + y)
+				local bits = if bgi
+						and ch >= 49
+						and ch <= 57
+					then (if y < 7 then bgiDigits[ch - 48][y + 1] * 2 else 0)
+					else buffer.readu8(Font, ch * 8 + y)
 				for x = 0, 7 do
 					if bit32.band(bits, bit32.rshift(128, x)) ~= 0 then
 						buffer.writeu32(
@@ -146,3 +161,62 @@ for _, make in ipairs({ textContext, graphicsContext }) do
 	)
 end
 print("PASS prompts, blank lines and outdents stop continuation merging; multiple rows merge")
+
+local digitLines: { string } = {}
+for n = 1, 9 do
+	table.insert(digitLines, tostring(n) .. ". Item")
+end
+for _, useBgi in ipairs({ false, true }) do
+	local context, bus = graphicsContext(digitLines, nil, useBgi)
+	assert(#context.choices == 9, "all nine graphics digits recognized")
+	local cpu = CPU.new()
+	cpu.waitingForKey = true
+	local scheduler = Scheduler.new(cpu, bus, {}, { headless = true })
+	local video = {
+		bus = bus,
+		getInputContext = function()
+			return context
+		end,
+	}
+	local router = Router.new(
+		{ cpu = cpu, scheduler = scheduler, bus = bus, video = video, hle = {} },
+		{ headless = true, smartMenuClick = true, gamepadMenuHighlight = true }
+	)
+	local shown: any = nil
+	router.hud = {
+		setMenuHighlight = function(_, r: any, visible: boolean)
+			shown = if visible then r else nil
+		end,
+		setWaiting = function() end,
+	}
+	router:setInputType("MouseMovement")
+	for n = 1, 9 do
+		cpu.waitingForKey = true
+		local found: any = nil
+		for _, r in ipairs(context.regions) do
+			if r.digit == n then
+				found = r
+			end
+		end
+		assert(found, "digit region missing " .. n)
+		local x, y = found.x + found.width / 2, found.y + found.height / 2
+		router:pointerMove("mouse", x, y)
+		assert(shown and shown.digit == n, "hover digit " .. n)
+		router:tap(x, y)
+		router:update(0)
+		local head = bus:read16(0x41a)
+		local word = bus:read16(0x400 + head)
+		assert(word % 256 == 48 + n, "tap digit " .. n)
+		bus:write16(0x41a, bus:read16(0x41c))
+	end
+end
+print("PASS all CP437 and BGI digits hover and click")
+for _, make in ipairs({ textContext, graphicsContext }) do
+	local ctx = make({ "1. asher", "2. bob", "3.", "4.", "5." })
+	assert(ctx.textInput and not ctx.menu and #ctx.choices == 0, "empty numbered rows indicate text form")
+	local filled = make({ "1. asher", "2. bob_" })
+	assert(filled.textInput and not filled.menu, "editing cursor indicates text form")
+	local confirm = make({ "1. asher", "2. bob", "Are these names correct?" })
+	assert(confirm.textInput and not confirm.menu and confirm.confirmPrompt, "confirmation suppresses menu")
+end
+print("PASS numbered forms and confirmation prompts suppress menu actions")

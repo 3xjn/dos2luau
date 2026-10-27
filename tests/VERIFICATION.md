@@ -10,6 +10,10 @@ Verified on Windows with Bun 1.3.4, Lune 0.10.4, and official Luau CLI 0.744.
 | `bun run test:video` | 9 raster, display-setting and text-region checks pass |
 | `bun run test:text-regions` | Wrapped text/graphics choice bounds, hover/click, and continuation boundaries pass |
 | `bun run test:input` | 18 routing, focus, assist and device checks pass |
+| `bun run test:keyboard` | Captured physical orphan I/O releases, deduplication and focus/modal guards pass |
+| `bun run test:typematic` | Held letter/backspace/arrow repetition, live elapsed-time guard and speaker pacing pass |
+| `bun run test:menu-repeat` | Keyboard/D-pad/stick repeat, release cancellation and confirmation dispatch pass |
+| `bun run test:audio` | Sub-frame note hold, bell duration, sustained gate and master gain pass |
 | `bun run test:settings-runtime` | 4 speed, gain, initialization and legacy keyboard checks pass |
 | `bun run test:settings` | Setting dispatch, shortcuts and touch override checks pass |
 | `bun run test:player-isolation` | Sound, Humanoid, emote state and cleanup checks pass |
@@ -86,9 +90,21 @@ Wrapped option 4 merges both lines in synthetic text and graphics menus, with
 the continuation separately exercised through hover and digit+Enter injection.
 The captured Oregon profession frame also yields one option-4 rectangle covering
 the real BGI continuation line. Blank rows, outdents and prompts stop merging.
+All nine numbered choices are also rendered with both CP437 and BGI digit
+templates and exercised through hover and click. Incomplete numbered name forms
+are not menus; a detected confirmation question exposes explicit Yes/No actions.
 In the live Studio client, hovering the second line outlined both lines, and
 clicking it opened Oregon's profession-differences screen (option 4).
 The final production LocalScript boots without privileged diagnostic helpers.
+Live checks also verified that holding Backspace clears a name, clicking a roster
+name no longer submits it, and the explicit Yes button submits Y plus Enter.
+The bundled PC-speaker fallback and nine voice sounds load in SoundService;
+minimum note duration and speaker-aware CPU pacing are covered by unit tests.
+Physical keyboard diagnostics later found that Roblox delivered only InputEnded
+for I/O, while A delivered both InputBegan and InputEnded. KeyboardInput recovers
+the missing I/O make on release, deduplicates complete presses, and guards
+textbox, modal and window-focus transitions. The captured sequence is a
+regression fixture shared with the router and legacy keyboard paths.
 Its camera remains Scriptable after a competing type change, the emote wheel
 stays disabled after the Period shortcut, local character Sound volumes are
 zero, and the Humanoid's movement/jump settings are disabled. Optional restricted

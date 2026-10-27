@@ -168,7 +168,7 @@ function Hud.bind(self: any, router: any)
 		local text = self.textBox.Text
 		self.textBox.Text = ""
 		self.keyboardActive = false
-		if not self.destroying and not self.suspended and self.quickBarEnabled == true then
+		if not self.destroying and not self.suspended then
 			router:typeText(text, true)
 		end
 		self:setWaiting(self.waiting)
@@ -251,10 +251,61 @@ function Hud.setTouchMode(self: any, enabled: boolean)
 		end
 	end
 end
+function Hud.setConfirmation(self: any, region: any, visible: boolean)
+	local show = visible and region ~= nil and not self.suspended and not self.keyboardActive
+	if not self.imageLabel or (not show and not self.confirmation) then
+		return
+	end
+	if not self.confirmation then
+		local panel = Instance.new("Frame")
+		self.confirmation = panel
+		panel.Name = "ConfirmationActions"
+		panel.Size = UDim2.fromOffset(194, 42)
+		panel.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+		panel.BackgroundTransparency = 0.12
+		panel.BorderSizePixel = 0
+		panel.ZIndex = 12
+		panel.Parent = self.imageLabel
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, 7)
+		corner.Parent = panel
+		for index, answer in ipairs({ "Y", "N" }) do
+			local button = Instance.new("TextButton")
+			button.Name = answer
+			button.Text = if answer == "Y" then "Yes (Y)" else "No (N)"
+			button.Size = UDim2.new(0.5, -6, 1, -8)
+			button.Position = UDim2.new((index - 1) * 0.5, 4, 0, 4)
+			button.BackgroundColor3 = Color3.fromRGB(43, 43, 49)
+			button.BorderSizePixel = 0
+			button.TextColor3 = Color3.new(1, 1, 1)
+			button.TextSize = 16
+			button.ZIndex = 13
+			button.Parent = panel
+			local radius = Instance.new("UICorner")
+			radius.CornerRadius = UDim.new(0, 5)
+			radius.Parent = button
+			self.connections[#self.connections + 1] = button.Activated:Connect(function()
+				if self.router then
+					self.router:answerConfirmation(answer)
+				end
+			end)
+		end
+	end
+	self.confirmation.Visible = show
+	if show then
+		local above = region.y >= 0.15
+		self.confirmation.AnchorPoint = Vector2.new(1, if above then 1 else 0)
+		self.confirmation.Position =
+			UDim2.new(1, -12, if above then region.y else region.y + region.height, if above then -8 else 8)
+	end
+end
 function Hud.setSuspended(self: any, value: boolean)
 	self.suspended = value
 	self:setWaiting(self.waiting)
 	if value then
+		if self.confirmation then
+			self.confirmation.Visible = false
+		end
 		if self.bar then
 			self.bar.Visible = false
 		end

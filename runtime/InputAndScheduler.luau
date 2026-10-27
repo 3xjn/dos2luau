@@ -1,5 +1,6 @@
 --!strict
 local Interpreter = require(script.Parent.Interpreter)
+local KeyboardInput = require(script.Parent.KeyboardInput)
 -- IPS estimates share an approximate 4.77 MHz / 364130 IPS ratio; these are
 -- workload pacing presets, not cycle-accurate CPU models.
 local PRESET_IPS = { turbo = 3500000, xt = 364130, ["286"] = 916050, ["386"] = 2519145 }
@@ -108,6 +109,12 @@ function Scheduler.new(cpu: any, bus: any, dispatcher: any, options: any): any
 		pendingKeyboard = 0,
 		scanQueue = {},
 		held = {},
+		repeatKey = nil,
+		repeatTimer = 0,
+		repeatDelay = 0.30,
+		repeatInterval = 0.055,
+		repeatClock = options.repeatClock or os.clock,
+		repeatSampleAt = nil,
 		caps = false,
 		connections = {},
 	}, Scheduler)
@@ -123,6 +130,35 @@ function Scheduler.setSpeedPreset(self: any, name: string)
 	assert(PRESET_IPS[name] ~= nil, "Unknown speed preset: " .. tostring(name))
 	self.speedPreset = name
 	self.speedExplicit = true
+end
+local function isModifier(name: string): boolean
+	return name == "CapsLock"
+		or name == "LeftShift"
+		or name == "RightShift"
+		or name == "LeftControl"
+		or name == "RightControl"
+		or name == "LeftAlt"
+		or name == "RightAlt"
+end
+function Scheduler.computeKeyWord(self: any, name: string): (number, number)
+	local k = keys[name]
+	local ascii = k[2] or 0
+	local shift = self.held.LeftShift or self.held.RightShift
+	local ctrl = self.held.LeftControl or self.held.RightControl
+	local alt = self.held.LeftAlt or self.held.RightAlt
+	if ascii >= 97 and ascii <= 122 then
+		if ctrl then
+			ascii -= 96
+		elseif (shift and not self.caps) or (self.caps and not shift) then
+			ascii -= 32
+		end
+	elseif shift and k[3] then
+		ascii = k[3]
+	end
+	if alt then
+		ascii = 0
+	end
+	return k[1], ascii
 end
 function Scheduler.keyEvent(self: any, name: string, down: boolean)
 	local k = keys[name]
@@ -152,32 +188,27 @@ function Scheduler.keyEvent(self: any, name: string, down: boolean)
 		table.insert(self.scanQueue, if down then k[1] else k[1] + 128)
 		self.pendingKeyboard += 1
 	end
-	if
-		not down
-		or name == "CapsLock"
-		or name == "LeftShift"
-		or name == "RightShift"
-		or name == "LeftControl"
-		or name == "RightControl"
-		or name == "LeftAlt"
-		or name == "RightAlt"
-	then
+	if not down then
+		if self.repeatKey == name then
+			self.repeatKey = nil
+			self.repeatTimer = 0
+			self.repeatSampleAt = nil
+		end
 		return
 	end
-	local ascii = k[2] or 0
-	if ascii >= 97 and ascii <= 122 then
-		if ctrl then
-			ascii -= 96
-		elseif (shift and not self.caps) or (self.caps and not shift) then
-			ascii -= 32
-		end
-	elseif shift and k[3] then
-		ascii = k[3]
+	if isModifier(name) then
+		return
 	end
-	if alt then
-		ascii = 0
-	end
-	self:enqueueWord(k[1], ascii, false)
+	self.repeatKey = name
+	self.repeatSampleAt = self.repeatClock()
+	self.repeatTimer = if name == "Up"
+			or name == "Down"
+			or name == "Left"
+			or name == "Right"
+		then 0.16
+		else self.repeatDelay
+	local scan, ascii = self:computeKeyWord(name)
+	self:enqueueWord(scan, ascii, false)
 end
 function Scheduler.enqueueWord(self: any, scan: number, ascii: number, injectScan: boolean?): boolean
 	if injectScan and #self.scanQueue > 254 then
@@ -211,6 +242,9 @@ function Scheduler.enqueueWord(self: any, scan: number, ascii: number, injectSca
 	return false
 end
 function Scheduler.releaseAll(self: any)
+	self.repeatKey = nil
+	self.repeatTimer = 0
+	self.repeatSampleAt = nil
 	local held = {}
 	for name in pairs(self.held) do
 		table.insert(held, name)
@@ -221,6 +255,33 @@ function Scheduler.releaseAll(self: any)
 end
 function Scheduler.step(self: any, dt: number)
 	dt = math.max(0, dt)
+	if self.keyboardInput then
+		self.keyboardInput:poll()
+	elseif self.inputRouter and self.inputRouter.keyboardInput then
+		self.inputRouter.keyboardInput:poll()
+	end
+	local repeatKey = self.repeatKey
+	if repeatKey and self.held[repeatKey] then
+		local repeatDt = dt
+		if self.interactive and not self.options.headless and not self.options.deterministic then
+			local now = self.repeatClock()
+			repeatDt = math.min(dt, math.max(0, now - (self.repeatSampleAt or now)))
+			self.repeatSampleAt = now
+		end
+		self.repeatTimer -= repeatDt
+		if self.repeatTimer <= 0 then
+			self.repeatTimer = math.max(0.01, self.repeatTimer + self.repeatInterval)
+			local head = self.bus:read16(0x41a)
+			local tail = self.bus:read16(0x41c)
+			if head == tail and #self.scanQueue < 16 then
+				local scan, ascii = self:computeKeyWord(repeatKey)
+				if self:enqueueWord(scan, ascii, false) then
+					table.insert(self.scanQueue, scan)
+					self.pendingKeyboard += 1
+				end
+			end
+		end
+	end
 	local c = self.cpu
 	local opts = self.options
 	local paced = self.interactive == true
@@ -235,6 +296,10 @@ function Scheduler.step(self: any, dt: number)
 	local speed = if paced and self.speedExplicit
 		then PRESET_IPS[self.speedPreset]
 		else opts.instructionsPerSecond or (if paced then PRESET_IPS[self.speedPreset] else 364130)
+	if turbo and self.audio and self.audio.speakerActive and (self.speedExplicit or not opts.instructionsPerSecond) then
+		speed = math.min(speed, PRESET_IPS.xt)
+	end
+	self.effectiveIPS = speed
 	self.credit = math.min(self.credit + dt * speed, maxFrame)
 	if paced then
 		self.wallTick = (self.wallTick or 0) + dt * 18.2065
@@ -339,9 +404,12 @@ end
 function Scheduler.handleInputBegan(self: any, obj: any, processed: boolean, input: any)
 	local keyboard = obj.UserInputType and obj.UserInputType.Name == "Keyboard"
 	if keyboard then
-		if input:GetFocusedTextBox() == nil then
-			self:keyEvent(obj.KeyCode.Name, true)
+		if not self.keyboardInput then
+			self.keyboardInput = KeyboardInput.new(input, function(name: string, down: boolean)
+				self:keyEvent(name, down)
+			end)
 		end
+		self.keyboardInput:began(obj.KeyCode.Name)
 	elseif not processed then
 		self:keyEvent(obj.KeyCode.Name, true)
 	end
@@ -361,11 +429,19 @@ function Scheduler.start(self: any)
 		table.insert(self.connections, heartbeat)
 		return
 	end
+	self.keyboardInput = KeyboardInput.new(input, function(name: string, down: boolean)
+		self:keyEvent(name, down)
+	end)
+	self.keyboardInput:start()
 	local began: any = input.InputBegan:Connect(function(obj: any, processed: boolean)
 		self:handleInputBegan(obj, processed, input)
 	end)
 	local ended: any = input.InputEnded:Connect(function(obj: any)
-		self:keyEvent(obj.KeyCode.Name, false)
+		if obj.UserInputType.Name == "Keyboard" then
+			self.keyboardInput:ended(obj.KeyCode.Name)
+		else
+			self:keyEvent(obj.KeyCode.Name, false)
+		end
 	end)
 	local focus: any = input.WindowFocusReleased:Connect(function()
 		self:releaseAll()
@@ -376,6 +452,10 @@ function Scheduler.start(self: any)
 	table.insert(self.connections, focus)
 end
 function Scheduler.stop(self: any)
+	if self.keyboardInput then
+		self.keyboardInput:destroy()
+		self.keyboardInput = nil
+	end
 	if self.inputRouter then
 		self.inputRouter:releaseAll()
 	end

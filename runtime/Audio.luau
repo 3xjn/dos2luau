@@ -2,6 +2,9 @@
 -- PC speaker, a lightweight OPL2 approximation, and Sound Blaster DMA playback.
 local Audio = {}
 Audio.__index = Audio
+-- Supply a looped 440 Hz waveform for faithful PC-speaker timbre.
+local DEFAULT_SPEAKER_ASSET = "rbxasset://sounds/uuhhh.mp3"
+Audio.DEFAULT_SPEAKER_ASSET = DEFAULT_SPEAKER_ASSET
 local function sound(asset: any, looped: boolean, provided: any): any
 	if provided then
 		return provided
@@ -33,6 +36,10 @@ function Audio.new(bus: any, options: any): any
 		bus = bus,
 		masterGain = 1,
 		speakerBaseVolume = 0,
+		speakerHold = 0,
+		speakerActive = false,
+		speakerFresh = false,
+		lastTriggeredFreq = 0,
 		options = options,
 		pendingIRQ = nil,
 		pitDivisor = 0,
@@ -57,11 +64,19 @@ function Audio.new(bus: any, options: any): any
 		pcm = nil,
 	}, Audio)
 	if not options.headless or options.speakerSound or options.oplSounds or options.pcmSound then
-		self.speaker = sound(options.speakerAssetId, true, options.speakerSound)
+		local fallback = if options.headless then nil else DEFAULT_SPEAKER_ASSET
+		self.speaker = sound(options.speakerAssetId or fallback, true, options.speakerSound)
+		if self.speaker and not options.speakerSound then
+			self.speaker.Name = "DOSPCSpeaker"
+		end
 		self.pcm = sound(nil, false, options.pcmSound)
 		for i = 1, 9 do
 			self.voices[i] = {
-				sound = sound(options.oplAssetId, true, if options.oplSounds then options.oplSounds[i] else nil),
+				sound = sound(
+					options.oplAssetId or fallback,
+					true,
+					if options.oplSounds then options.oplSounds[i] else nil
+				),
 				level = 0,
 			}
 		end
@@ -77,8 +92,11 @@ function Audio.new(bus: any, options: any): any
 		self.speaker.Volume = 0
 		self.speaker:Play()
 	end
-	for _, voice in ipairs(self.voices) do
+	for i, voice in ipairs(self.voices) do
 		if voice.sound then
+			if not (options.oplSounds and options.oplSounds[i]) then
+				voice.sound.Name = "DOSOPL" .. tostring(i)
+			end
 			voice.sound.Looped = true
 			voice.sound.Volume = 0
 			voice.sound:Play()
@@ -256,13 +274,21 @@ end
 function Audio.updateSpeaker(self: any)
 	local divisor: number = if self.pitDivisor == 0 then 65536 else self.pitDivisor :: number
 	local frequency = 1193182 / divisor
+	local retrigger = not self.speakerActive or frequency ~= self.lastTriggeredFreq
+	self.speakerActive = bit32.band(self.port61, 3) == 3 and frequency >= 20 and frequency <= 8800
+	if self.speakerActive then
+		self.speakerHold = 0.05
+		self.speakerFresh = true
+		self.lastTriggeredFreq = frequency
+		self.speakerBaseVolume = 0.2
+		if self.speaker then
+			self.speaker.PlaybackSpeed = math.clamp(frequency / 440, 0.05, 20)
+			if retrigger then
+				self.speaker.TimePosition = 0
+			end
+		end
+	end
 	if self.speaker then
-		self.speaker.PlaybackSpeed = math.clamp(frequency / 440, 0.01, 20)
-		self.speakerBaseVolume = if bit32.band(self.port61, 3) == 3
-				and frequency >= 20
-				and frequency <= 8800
-			then 0.2
-			else 0
 		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
 	end
 end
@@ -271,6 +297,19 @@ local function rate(n: number): number
 	return if n == 0 then 0 else 0.15 * 2 ^ (n / 2)
 end
 function Audio.update(self: any, dt: number, _cpu: any)
+	-- The guest may turn a note on and off inside this CPU slice. Do not
+	-- subtract time from before that note was triggered in this same frame.
+	if self.speakerFresh then
+		self.speakerFresh = false
+	else
+		self.speakerHold = math.max(0, self.speakerHold - math.max(0, dt))
+	end
+	if not self.speakerActive and self.speakerHold <= 0 then
+		self.speakerBaseVolume = 0
+	end
+	if self.speaker then
+		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
+	end
 	for i = 0, 8 do
 		local voice = self.voices[i + 1]
 		local a = self.opl[0xa0 + i] or 0
@@ -325,8 +364,13 @@ function Audio.update(self: any, dt: number, _cpu: any)
 	end
 end
 function Audio.bell(self: any)
+	self.speakerHold = 0.08
+	self.speakerFresh = true
+	self.lastTriggeredFreq = 440
+	self.speakerBaseVolume = 0.2
 	if self.speaker then
-		self.speakerBaseVolume = 0.2
+		self.speaker.PlaybackSpeed = 1
+		self.speaker.TimePosition = 0
 		self.speaker.Volume = self.speakerBaseVolume * self.masterGain
 	end
 end
